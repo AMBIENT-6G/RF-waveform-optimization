@@ -25,7 +25,7 @@ ALLOWED_TONES = (0, 4, 8, 16, 32)
 
 # Fixed radio settings for simplicity.
 USRP_ARGS = ""
-CHANNEL = 0
+CHANNEL = 1
 TX_ANTENNA = "TX/RX"
 START_DELAY_S = 0.2
 
