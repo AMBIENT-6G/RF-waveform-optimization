@@ -26,7 +26,7 @@ ALLOWED_CHANNELS = (0, 1)
 
 # Fixed radio settings for simplicity.
 DEFAULT_USRP_ARGS = (
-    "num_send_frames=1024,num_recv_frames=256,send_frame_size=8192,recv_frame_size=8192"
+    "num_send_frames=1024,num_recv_frames=256,send_frame_size=8184,recv_frame_size=8184"
 )
 DEFAULT_CHANNEL = 0
 TX_ANTENNA = "TX/RX"
