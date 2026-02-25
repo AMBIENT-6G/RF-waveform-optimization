@@ -177,7 +177,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Replay one exported IQ tone block on B210")
     p.add_argument("--tone", type=int, required=True, choices=ALLOWED_TONES, help="Tone set to play")
     p.add_argument("--tx-gain", type=float, required=True, help="TX gain in dB")
-    p.add_argument("--duration", type=float, required=True, help="Playback duration in seconds")
+    p.add_argument("--duration", type=float, default=10.0, help="Playback duration in seconds")
     return p
 
 
@@ -213,7 +213,7 @@ def main() -> int:
         f"freq={actual_freq/1e6:.6f} MHz, gain={actual_gain:.2f} dB"
     )
 
-    max_samps = int(tx_stream.get_max_num_samps())
+    max_samps = int(tx_stream.get_max_num_samps())  
     n_repeats = max(1, int(math.ceil(args.duration * sample_rate_hz / iq.size)))
     actual_duration = n_repeats * iq.size / sample_rate_hz
     print(
