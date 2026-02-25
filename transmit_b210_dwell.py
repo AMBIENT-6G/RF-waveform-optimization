@@ -29,6 +29,8 @@ USRP_ARGS = ""
 DEFAULT_CHANNEL = 0
 TX_ANTENNA = "TX/RX"
 START_DELAY_S = 0.2
+DEFAULT_CHUNK_MULT = 64
+DEFAULT_SEND_TIMEOUT_S = 0.5
 
 
 def _set_with_channel(fn, value, channel):
@@ -82,6 +84,13 @@ def _get_tx_num_channels(usrp) -> int:
         return int(usrp.get_tx_num_channels())
     except Exception:
         return 1
+
+
+def _tx_send(tx_stream, samples, md, timeout_s: float) -> int:
+    try:
+        return int(tx_stream.send(samples, md, timeout_s))
+    except TypeError:
+        return int(tx_stream.send(samples, md))
 
 
 def find_iq_file_for_tone(iq_dir: Path, tone: int) -> Path:
@@ -185,18 +194,26 @@ def make_start_metadata(uhd_module, usrp, start_delay_s: float):
     return md
 
 
-def send_buffered(tx_stream, samples: np.ndarray, md, max_samps: int) -> None:
+def send_buffered(
+    tx_stream,
+    samples: np.ndarray,
+    md,
+    max_samps: int,
+    send_chunk_samps: int,
+    send_timeout_s: float,
+) -> None:
     offset = 0
     first = True
     total = int(samples.shape[-1]) if samples.ndim > 1 else int(samples.size)
     zero_sends = 0
+    target_samps = max(max_samps, int(send_chunk_samps))
 
     while offset < total:
-        n = min(max_samps, total - offset)
+        n = min(target_samps, total - offset)
         chunk = samples[:, offset : offset + n] if samples.ndim > 1 else samples[offset : offset + n]
         if chunk.ndim > 1 and not chunk.flags.c_contiguous:
             chunk = np.ascontiguousarray(chunk)
-        sent = int(tx_stream.send(chunk, md))
+        sent = _tx_send(tx_stream, chunk, md, send_timeout_s)
         if sent < 0:
             raise RuntimeError(f"TX send failed: requested {n}, sent {sent}")
         if sent == 0:
@@ -242,6 +259,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--tx-gain", type=float, required=True, help="TX gain in dB")
     p.add_argument("--duration", type=float, default=10.0, help="Playback duration in seconds")
     p.add_argument(
+        "--start-delay",
+        type=float,
+        default=START_DELAY_S,
+        help="Timed TX start offset in seconds to allow host queue prefill",
+    )
+    p.add_argument(
+        "--chunk-mult",
+        type=int,
+        default=DEFAULT_CHUNK_MULT,
+        help="Requested send chunk size multiplier relative to UHD max_num_samps",
+    )
+    p.add_argument(
+        "--send-timeout",
+        type=float,
+        default=DEFAULT_SEND_TIMEOUT_S,
+        help="Timeout (seconds) for each tx_stream.send() call",
+    )
+    p.add_argument(
         "--channel",
         type=int,
         default=DEFAULT_CHANNEL,
@@ -260,6 +295,12 @@ def main() -> int:
     args = build_arg_parser().parse_args()
     if args.duration <= 0:
         raise ValueError("--duration must be > 0")
+    if args.start_delay < 0:
+        raise ValueError("--start-delay must be >= 0")
+    if args.chunk_mult <= 0:
+        raise ValueError("--chunk-mult must be > 0")
+    if args.send_timeout <= 0:
+        raise ValueError("--send-timeout must be > 0")
     tx_channels = [0, 1] if args.both_channels else [args.channel]
 
     iq_file = find_iq_file_for_tone(IQ_DIR, args.tone)
@@ -269,7 +310,9 @@ def main() -> int:
     print(f"IQ stats: samples={iq.size}, avg_power={power:.6g}, peak={peak:.6g}")
     print(
         f"Replay settings: fs={sample_rate_hz:.3f} Sa/s, fc={center_freq_hz/1e6:.6f} MHz, "
-        f"tx_gain={args.tx_gain:.2f} dB, channels={tx_channels}"
+        f"tx_gain={args.tx_gain:.2f} dB, channels={tx_channels}, "
+        f"start_delay={args.start_delay:.3f}s, chunk_mult={args.chunk_mult}, "
+        f"send_timeout={args.send_timeout:.3f}s"
     )
 
     try:
@@ -295,19 +338,21 @@ def main() -> int:
         )
 
     max_samps = int(tx_stream.get_max_num_samps())
+    send_chunk_samps = max_samps * args.chunk_mult
     n_repeats = max(1, int(math.ceil(args.duration * sample_rate_hz / iq.size)))
     actual_duration = n_repeats * iq.size / sample_rate_hz
     print(
         f"Playback: requested={args.duration:.6f}s, actual={actual_duration:.6f}s, "
-        f"repeats={n_repeats}, max_samps_per_send={max_samps}"
+        f"repeats={n_repeats}, max_samps_per_send={max_samps}, "
+        f"requested_send_chunk_samps={send_chunk_samps}"
     )
 
-    md = make_start_metadata(uhd, usrp, START_DELAY_S)
+    md = make_start_metadata(uhd, usrp, args.start_delay)
     tx_iq = np.vstack((iq, iq)) if len(tx_channels) > 1 else iq
 
     try:
         for _ in range(n_repeats):
-            send_buffered(tx_stream, tx_iq, md, max_samps)
+            send_buffered(tx_stream, tx_iq, md, max_samps, send_chunk_samps, args.send_timeout)
     finally:
         print("Stopping TX (sending end-of-burst)...")
         try:
