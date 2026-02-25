@@ -26,7 +26,7 @@ ALLOWED_CHANNELS = (0, 1)
 
 # Fixed radio settings for simplicity.
 USRP_ARGS = ""
-DEFAULT_CHANNEL = 1
+DEFAULT_CHANNEL = 0
 TX_ANTENNA = "TX/RX"
 START_DELAY_S = 0.2
 
@@ -55,14 +55,17 @@ def _make_tune_request(uhd_module, freq_hz: float):
             return freq_hz
 
 
-def _set_tx_subdev_for_channel(uhd_module, usrp, channel: int) -> str:
-    # B210 TX channel mapping: 0 -> A:A, 1 -> A:B
-    subdev = "A:A" if channel == 0 else "A:B"
+def _set_tx_subdev_for_b210(uhd_module, usrp) -> str:
+    # Keep both TX frontends active so channel 1 exists as index 1.
+    subdev = "A:A A:B"
     try:
         spec = uhd_module.usrp.SubdevSpec(subdev)
         usrp.set_tx_subdev_spec(spec)
     except Exception:
-        usrp.set_tx_subdev_spec(subdev)
+        try:
+            usrp.set_tx_subdev_spec(subdev)
+        except Exception:
+            return "default"
     return subdev
 
 
@@ -72,6 +75,13 @@ def _get_tx_antennas(usrp, channel: int):
     except TypeError:
         antennas = usrp.get_tx_antennas()
     return list(antennas)
+
+
+def _get_tx_num_channels(usrp) -> int:
+    try:
+        return int(usrp.get_tx_num_channels())
+    except Exception:
+        return 1
 
 
 def find_iq_file_for_tone(iq_dir: Path, tone: int) -> Path:
@@ -128,24 +138,33 @@ def load_iq_file(path: Path):
     return iq, fs_hz, fc_hz, power, peak
 
 
-def setup_usrp(uhd_module, sample_rate_hz: float, center_freq_hz: float, tx_gain_db: float, channel: int):
+def setup_usrp(uhd_module, sample_rate_hz: float, center_freq_hz: float, tx_gain_db: float, channels: list[int]):
     usrp = uhd_module.usrp.MultiUSRP(USRP_ARGS)
-    subdev = _set_tx_subdev_for_channel(uhd_module, usrp, channel)
+    subdev = _set_tx_subdev_for_b210(uhd_module, usrp)
+    num_channels = _get_tx_num_channels(usrp)
+    if any(ch < 0 or ch >= num_channels for ch in channels):
+        raise ValueError(
+            f"Requested TX channels {channels}, but device exposes {num_channels} TX channel(s) "
+            f"(valid: 0..{max(0, num_channels - 1)}; subdev_spec={subdev})"
+        )
 
-    antennas = _get_tx_antennas(usrp, channel)
-    tx_antenna = TX_ANTENNA if TX_ANTENNA in antennas else (antennas[0] if antennas else TX_ANTENNA)
+    channel_antennas = {}
+    for channel in channels:
+        antennas = _get_tx_antennas(usrp, channel)
+        tx_antenna = TX_ANTENNA if TX_ANTENNA in antennas else (antennas[0] if antennas else TX_ANTENNA)
 
-    _set_with_channel(usrp.set_tx_rate, sample_rate_hz, channel)
-    _set_with_channel(usrp.set_tx_freq, _make_tune_request(uhd_module, center_freq_hz), channel)
-    _set_with_channel(usrp.set_tx_gain, tx_gain_db, channel)
-    _set_with_channel(usrp.set_tx_bandwidth, sample_rate_hz, channel)
-    _set_with_channel(usrp.set_tx_antenna, tx_antenna, channel)
+        _set_with_channel(usrp.set_tx_rate, sample_rate_hz, channel)
+        _set_with_channel(usrp.set_tx_freq, _make_tune_request(uhd_module, center_freq_hz), channel)
+        _set_with_channel(usrp.set_tx_gain, tx_gain_db, channel)
+        _set_with_channel(usrp.set_tx_bandwidth, sample_rate_hz, channel)
+        _set_with_channel(usrp.set_tx_antenna, tx_antenna, channel)
+        channel_antennas[channel] = tx_antenna
 
     stream_args = uhd_module.usrp.StreamArgs("fc32", "sc16")
-    stream_args.channels = [channel]
+    stream_args.channels = channels
     tx_stream = usrp.get_tx_stream(stream_args)
 
-    return usrp, tx_stream, subdev, tx_antenna
+    return usrp, tx_stream, subdev, channel_antennas
 
 
 def make_start_metadata(uhd_module, usrp, start_delay_s: float):
@@ -169,12 +188,15 @@ def make_start_metadata(uhd_module, usrp, start_delay_s: float):
 def send_buffered(tx_stream, samples: np.ndarray, md, max_samps: int) -> None:
     offset = 0
     first = True
-    total = samples.size
+    total = int(samples.shape[-1]) if samples.ndim > 1 else int(samples.size)
     zero_sends = 0
 
     while offset < total:
         n = min(max_samps, total - offset)
-        sent = int(tx_stream.send(samples[offset : offset + n], md))
+        chunk = samples[:, offset : offset + n] if samples.ndim > 1 else samples[offset : offset + n]
+        if chunk.ndim > 1 and not chunk.flags.c_contiguous:
+            chunk = np.ascontiguousarray(chunk)
+        sent = int(tx_stream.send(chunk, md))
         if sent < 0:
             raise RuntimeError(f"TX send failed: requested {n}, sent {sent}")
         if sent == 0:
@@ -195,17 +217,23 @@ def send_buffered(tx_stream, samples: np.ndarray, md, max_samps: int) -> None:
             first = False
 
 
-def send_eob(uhd_module, tx_stream) -> None:
+def send_eob(uhd_module, tx_stream, num_channels: int) -> None:
     md = uhd_module.types.TXMetadata()
     md.start_of_burst = False
     md.end_of_burst = True
     md.has_time_spec = False
 
-    empty = np.zeros(0, dtype=np.complex64)
+    if num_channels > 1:
+        empty = np.zeros((num_channels, 0), dtype=np.complex64)
+        fallback = np.zeros((num_channels, 1), dtype=np.complex64)
+    else:
+        empty = np.zeros(0, dtype=np.complex64)
+        fallback = np.zeros(1, dtype=np.complex64)
+
     try:
         tx_stream.send(empty, md)
     except Exception:
-        tx_stream.send(np.zeros(1, dtype=np.complex64), md)
+        tx_stream.send(fallback, md)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -218,7 +246,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_CHANNEL,
         choices=ALLOWED_CHANNELS,
-        help="TX channel index on B210 (0 -> A:A, 1 -> A:B)",
+        help="Single TX channel index on B210 (ignored when --both-channels is set)",
+    )
+    p.add_argument(
+        "--both-channels",
+        action="store_true",
+        help="Transmit the same IQ stream on TX channels 0 and 1 simultaneously",
     )
     return p
 
@@ -227,6 +260,7 @@ def main() -> int:
     args = build_arg_parser().parse_args()
     if args.duration <= 0:
         raise ValueError("--duration must be > 0")
+    tx_channels = [0, 1] if args.both_channels else [args.channel]
 
     iq_file = find_iq_file_for_tone(IQ_DIR, args.tone)
     iq, sample_rate_hz, center_freq_hz, power, peak = load_iq_file(iq_file)
@@ -235,7 +269,7 @@ def main() -> int:
     print(f"IQ stats: samples={iq.size}, avg_power={power:.6g}, peak={peak:.6g}")
     print(
         f"Replay settings: fs={sample_rate_hz:.3f} Sa/s, fc={center_freq_hz/1e6:.6f} MHz, "
-        f"tx_gain={args.tx_gain:.2f} dB, channel={args.channel}"
+        f"tx_gain={args.tx_gain:.2f} dB, channels={tx_channels}"
     )
 
     try:
@@ -245,18 +279,20 @@ def main() -> int:
             "Could not import Python UHD module `uhd`. Install UHD Python bindings."
         ) from exc
 
-    usrp, tx_stream, subdev, tx_antenna = setup_usrp(
-        uhd, sample_rate_hz, center_freq_hz, args.tx_gain, args.channel
+    usrp, tx_stream, subdev, channel_antennas = setup_usrp(
+        uhd, sample_rate_hz, center_freq_hz, args.tx_gain, tx_channels
     )
-
-    actual_rate = _get_with_channel(usrp.get_tx_rate, args.channel)
-    actual_freq = _get_with_channel(usrp.get_tx_freq, args.channel)
-    actual_gain = _get_with_channel(usrp.get_tx_gain, args.channel)
-    print(
-        f"USRP configured: rate={actual_rate:.3f} Sa/s, "
-        f"freq={actual_freq/1e6:.6f} MHz, gain={actual_gain:.2f} dB, "
-        f"channel={args.channel}, subdev={subdev}, antenna={tx_antenna}"
-    )
+    print(f"USRP configured: subdev={subdev}")
+    for channel in tx_channels:
+        actual_rate = _get_with_channel(usrp.get_tx_rate, channel)
+        actual_freq = _get_with_channel(usrp.get_tx_freq, channel)
+        actual_gain = _get_with_channel(usrp.get_tx_gain, channel)
+        tx_antenna = channel_antennas.get(channel, TX_ANTENNA)
+        print(
+            f"  ch{channel}: rate={actual_rate:.3f} Sa/s, "
+            f"freq={actual_freq/1e6:.6f} MHz, gain={actual_gain:.2f} dB, "
+            f"antenna={tx_antenna}"
+        )
 
     max_samps = int(tx_stream.get_max_num_samps())
     n_repeats = max(1, int(math.ceil(args.duration * sample_rate_hz / iq.size)))
@@ -267,14 +303,15 @@ def main() -> int:
     )
 
     md = make_start_metadata(uhd, usrp, START_DELAY_S)
+    tx_iq = np.vstack((iq, iq)) if len(tx_channels) > 1 else iq
 
     try:
         for _ in range(n_repeats):
-            send_buffered(tx_stream, iq, md, max_samps)
+            send_buffered(tx_stream, tx_iq, md, max_samps)
     finally:
         print("Stopping TX (sending end-of-burst)...")
         try:
-            send_eob(uhd, tx_stream)
+            send_eob(uhd, tx_stream, len(tx_channels))
         except Exception as exc:
             print(f"WARNING: Failed to send EOB cleanly: {exc}")
 
