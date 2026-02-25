@@ -22,10 +22,11 @@ import numpy as np
 
 IQ_DIR = Path("tx_iq")
 ALLOWED_TONES = (0, 4, 8, 16, 32)
+ALLOWED_CHANNELS = (0, 1)
 
 # Fixed radio settings for simplicity.
 USRP_ARGS = ""
-CHANNEL = 1
+DEFAULT_CHANNEL = 1
 TX_ANTENNA = "TX/RX"
 START_DELAY_S = 0.2
 
@@ -52,6 +53,25 @@ def _make_tune_request(uhd_module, freq_hz: float):
             return uhd_module.libpyuhd.types.tune_request(freq_hz)
         except Exception:
             return freq_hz
+
+
+def _set_tx_subdev_for_channel(uhd_module, usrp, channel: int) -> str:
+    # B210 TX channel mapping: 0 -> A:A, 1 -> A:B
+    subdev = "A:A" if channel == 0 else "A:B"
+    try:
+        spec = uhd_module.usrp.SubdevSpec(subdev)
+        usrp.set_tx_subdev_spec(spec)
+    except Exception:
+        usrp.set_tx_subdev_spec(subdev)
+    return subdev
+
+
+def _get_tx_antennas(usrp, channel: int):
+    try:
+        antennas = usrp.get_tx_antennas(channel)
+    except TypeError:
+        antennas = usrp.get_tx_antennas()
+    return list(antennas)
 
 
 def find_iq_file_for_tone(iq_dir: Path, tone: int) -> Path:
@@ -108,20 +128,24 @@ def load_iq_file(path: Path):
     return iq, fs_hz, fc_hz, power, peak
 
 
-def setup_usrp(uhd_module, sample_rate_hz: float, center_freq_hz: float, tx_gain_db: float):
+def setup_usrp(uhd_module, sample_rate_hz: float, center_freq_hz: float, tx_gain_db: float, channel: int):
     usrp = uhd_module.usrp.MultiUSRP(USRP_ARGS)
+    subdev = _set_tx_subdev_for_channel(uhd_module, usrp, channel)
 
-    _set_with_channel(usrp.set_tx_rate, sample_rate_hz, CHANNEL)
-    _set_with_channel(usrp.set_tx_freq, _make_tune_request(uhd_module, center_freq_hz), CHANNEL)
-    _set_with_channel(usrp.set_tx_gain, tx_gain_db, CHANNEL)
-    _set_with_channel(usrp.set_tx_bandwidth, sample_rate_hz, CHANNEL)
-    _set_with_channel(usrp.set_tx_antenna, TX_ANTENNA, CHANNEL)
+    antennas = _get_tx_antennas(usrp, channel)
+    tx_antenna = TX_ANTENNA if TX_ANTENNA in antennas else (antennas[0] if antennas else TX_ANTENNA)
+
+    _set_with_channel(usrp.set_tx_rate, sample_rate_hz, channel)
+    _set_with_channel(usrp.set_tx_freq, _make_tune_request(uhd_module, center_freq_hz), channel)
+    _set_with_channel(usrp.set_tx_gain, tx_gain_db, channel)
+    _set_with_channel(usrp.set_tx_bandwidth, sample_rate_hz, channel)
+    _set_with_channel(usrp.set_tx_antenna, tx_antenna, channel)
 
     stream_args = uhd_module.usrp.StreamArgs("fc32", "sc16")
-    stream_args.channels = [CHANNEL]
+    stream_args.channels = [channel]
     tx_stream = usrp.get_tx_stream(stream_args)
 
-    return usrp, tx_stream
+    return usrp, tx_stream, subdev, tx_antenna
 
 
 def make_start_metadata(uhd_module, usrp, start_delay_s: float):
@@ -189,6 +213,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--tone", type=int, required=True, choices=ALLOWED_TONES, help="Tone set to play")
     p.add_argument("--tx-gain", type=float, required=True, help="TX gain in dB")
     p.add_argument("--duration", type=float, default=10.0, help="Playback duration in seconds")
+    p.add_argument(
+        "--channel",
+        type=int,
+        default=DEFAULT_CHANNEL,
+        choices=ALLOWED_CHANNELS,
+        help="TX channel index on B210 (0 -> A:A, 1 -> A:B)",
+    )
     return p
 
 
@@ -204,7 +235,7 @@ def main() -> int:
     print(f"IQ stats: samples={iq.size}, avg_power={power:.6g}, peak={peak:.6g}")
     print(
         f"Replay settings: fs={sample_rate_hz:.3f} Sa/s, fc={center_freq_hz/1e6:.6f} MHz, "
-        f"tx_gain={args.tx_gain:.2f} dB"
+        f"tx_gain={args.tx_gain:.2f} dB, channel={args.channel}"
     )
 
     try:
@@ -214,17 +245,20 @@ def main() -> int:
             "Could not import Python UHD module `uhd`. Install UHD Python bindings."
         ) from exc
 
-    usrp, tx_stream = setup_usrp(uhd, sample_rate_hz, center_freq_hz, args.tx_gain)
-
-    actual_rate = _get_with_channel(usrp.get_tx_rate, CHANNEL)
-    actual_freq = _get_with_channel(usrp.get_tx_freq, CHANNEL)
-    actual_gain = _get_with_channel(usrp.get_tx_gain, CHANNEL)
-    print(
-        f"USRP configured: rate={actual_rate:.3f} Sa/s, "
-        f"freq={actual_freq/1e6:.6f} MHz, gain={actual_gain:.2f} dB"
+    usrp, tx_stream, subdev, tx_antenna = setup_usrp(
+        uhd, sample_rate_hz, center_freq_hz, args.tx_gain, args.channel
     )
 
-    max_samps = int(tx_stream.get_max_num_samps())  
+    actual_rate = _get_with_channel(usrp.get_tx_rate, args.channel)
+    actual_freq = _get_with_channel(usrp.get_tx_freq, args.channel)
+    actual_gain = _get_with_channel(usrp.get_tx_gain, args.channel)
+    print(
+        f"USRP configured: rate={actual_rate:.3f} Sa/s, "
+        f"freq={actual_freq/1e6:.6f} MHz, gain={actual_gain:.2f} dB, "
+        f"channel={args.channel}, subdev={subdev}, antenna={tx_antenna}"
+    )
+
+    max_samps = int(tx_stream.get_max_num_samps())
     n_repeats = max(1, int(math.ceil(args.duration * sample_rate_hz / iq.size)))
     actual_duration = n_repeats * iq.size / sample_rate_hz
     print(
