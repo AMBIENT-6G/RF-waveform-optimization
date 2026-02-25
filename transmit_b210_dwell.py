@@ -31,6 +31,7 @@ TX_ANTENNA = "TX/RX"
 START_DELAY_S = 0.2
 DEFAULT_CHUNK_MULT = 64
 DEFAULT_SEND_TIMEOUT_S = 0.5
+DEFAULT_OVERSAMPLE = 2
 
 
 def _set_with_channel(fn, value, channel):
@@ -93,6 +94,13 @@ def _tx_send(tx_stream, samples, md, timeout_s: float) -> int:
         return int(tx_stream.send(samples, md))
 
 
+def _set_tx_dc_offset(usrp, offset: complex, channel: int) -> None:
+    try:
+        usrp.set_tx_dc_offset(offset, channel)
+    except TypeError:
+        usrp.set_tx_dc_offset(offset)
+
+
 def find_iq_file_for_tone(iq_dir: Path, tone: int) -> Path:
     if not iq_dir.exists():
         raise FileNotFoundError(f"IQ directory not found: {iq_dir.resolve()}")
@@ -147,7 +155,50 @@ def load_iq_file(path: Path):
     return iq, fs_hz, fc_hz, power, peak
 
 
-def setup_usrp(uhd_module, sample_rate_hz: float, center_freq_hz: float, tx_gain_db: float, channels: list[int]):
+def remove_iq_dc(samples: np.ndarray) -> tuple[np.ndarray, complex]:
+    dc = complex(np.mean(samples))
+    out = (samples - dc).astype(np.complex64, copy=False)
+    return out, dc
+
+
+def oversample_periodic_iq(samples: np.ndarray, sample_rate_hz: float, factor: int) -> tuple[np.ndarray, float]:
+    if factor <= 1:
+        return samples.astype(np.complex64, copy=False), float(sample_rate_hz)
+
+    x = np.asarray(samples, dtype=np.complex64).ravel()
+    n = int(x.size)
+    if n < 2:
+        raise ValueError("Need at least 2 IQ samples for oversampling")
+
+    m = int(n * factor)
+    x_f = np.fft.fftshift(np.fft.fft(x, n=n))
+    pad_total = m - n
+    pad_left = pad_total // 2
+    pad_right = pad_total - pad_left
+    y_f = np.pad(x_f, (pad_left, pad_right), mode="constant")
+
+    # NumPy ifft uses 1/M scaling, so multiply by factor=M/N to preserve amplitude.
+    y = np.fft.ifft(np.fft.ifftshift(y_f), n=m) * float(factor)
+    return y.astype(np.complex64), float(sample_rate_hz) * float(factor)
+
+
+def apply_baseband_freq_shift(samples: np.ndarray, sample_rate_hz: float, shift_hz: float) -> np.ndarray:
+    if abs(shift_hz) < 1e-12:
+        return samples
+    n = np.arange(samples.size, dtype=np.float64)
+    rot = np.exp(1j * 2.0 * np.pi * shift_hz * (n / float(sample_rate_hz))).astype(np.complex64)
+    out = (samples * rot).astype(np.complex64, copy=False)
+    return out
+
+
+def setup_usrp(
+    uhd_module,
+    sample_rate_hz: float,
+    tune_freq_hz: float,
+    tx_gain_db: float,
+    channels: list[int],
+    tx_dc_offset: complex | None = None,
+):
     usrp = uhd_module.usrp.MultiUSRP(USRP_ARGS)
     subdev = _set_tx_subdev_for_b210(uhd_module, usrp)
     num_channels = _get_tx_num_channels(usrp)
@@ -163,10 +214,12 @@ def setup_usrp(uhd_module, sample_rate_hz: float, center_freq_hz: float, tx_gain
         tx_antenna = TX_ANTENNA if TX_ANTENNA in antennas else (antennas[0] if antennas else TX_ANTENNA)
 
         _set_with_channel(usrp.set_tx_rate, sample_rate_hz, channel)
-        _set_with_channel(usrp.set_tx_freq, _make_tune_request(uhd_module, center_freq_hz), channel)
+        _set_with_channel(usrp.set_tx_freq, _make_tune_request(uhd_module, tune_freq_hz), channel)
         _set_with_channel(usrp.set_tx_gain, tx_gain_db, channel)
         _set_with_channel(usrp.set_tx_bandwidth, sample_rate_hz, channel)
         _set_with_channel(usrp.set_tx_antenna, tx_antenna, channel)
+        if tx_dc_offset is not None:
+            _set_tx_dc_offset(usrp, tx_dc_offset, channel)
         channel_antennas[channel] = tx_antenna
 
     stream_args = uhd_module.usrp.StreamArgs("fc32", "sc16")
@@ -259,6 +312,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--tx-gain", type=float, required=True, help="TX gain in dB")
     p.add_argument("--duration", type=float, default=10.0, help="Playback duration in seconds")
     p.add_argument(
+        "--oversample",
+        type=int,
+        default=DEFAULT_OVERSAMPLE,
+        help=(
+            "Integer TX oversampling factor for edge protection. "
+            "Upsamples IQ and scales USRP tx rate by this factor."
+        ),
+    )
+    p.add_argument(
+        "--remove-dc",
+        action="store_true",
+        help="Subtract complex mean from IQ before TX (helps suppress LO leakage)",
+    )
+    p.add_argument(
+        "--lo-offset-hz",
+        type=float,
+        default=0.0,
+        help=(
+            "RF LO offset in Hz for leakage mitigation. "
+            "TX is tuned to fc + offset and IQ is digitally shifted by -offset."
+        ),
+    )
+    p.add_argument("--tx-dc-i", type=float, default=None, help="Manual TX DC correction, I component (-1.0..1.0)")
+    p.add_argument("--tx-dc-q", type=float, default=None, help="Manual TX DC correction, Q component (-1.0..1.0)")
+    p.add_argument(
         "--start-delay",
         type=float,
         default=START_DELAY_S,
@@ -301,18 +379,60 @@ def main() -> int:
         raise ValueError("--chunk-mult must be > 0")
     if args.send_timeout <= 0:
         raise ValueError("--send-timeout must be > 0")
+    if args.oversample < 1:
+        raise ValueError("--oversample must be >= 1")
     tx_channels = [0, 1] if args.both_channels else [args.channel]
 
     iq_file = find_iq_file_for_tone(IQ_DIR, args.tone)
     iq, sample_rate_hz, center_freq_hz, power, peak = load_iq_file(iq_file)
+    raw_num_samples = int(iq.size)
+    source_rate_hz = float(sample_rate_hz)
+    if args.oversample > 1:
+        iq, sample_rate_hz = oversample_periodic_iq(iq, sample_rate_hz, args.oversample)
+
+    if abs(args.lo_offset_hz) >= 0.5 * sample_rate_hz:
+        raise ValueError(
+            f"|--lo-offset-hz| must be < fs/2 ({0.5 * sample_rate_hz:.3f} Hz), got {args.lo_offset_hz:.3f} Hz"
+        )
+
+    tx_dc_offset = None
+    if (args.tx_dc_i is None) ^ (args.tx_dc_q is None):
+        raise ValueError("Provide both --tx-dc-i and --tx-dc-q, or neither.")
+    if args.tx_dc_i is not None and args.tx_dc_q is not None:
+        tx_dc_offset = complex(float(args.tx_dc_i), float(args.tx_dc_q))
 
     print(f"Selected IQ file: {iq_file}")
-    print(f"IQ stats: samples={iq.size}, avg_power={power:.6g}, peak={peak:.6g}")
+    print(f"IQ stats (raw): samples={raw_num_samples}, avg_power={power:.6g}, peak={peak:.6g}")
+
+    dc_removed = 0.0 + 0.0j
+    if args.remove_dc:
+        iq, dc_removed = remove_iq_dc(iq)
+
+    if abs(args.lo_offset_hz) > 0:
+        iq = apply_baseband_freq_shift(iq, sample_rate_hz, shift_hz=-args.lo_offset_hz)
+
+    proc_power = float(np.mean(np.abs(iq) ** 2))
+    proc_peak = float(np.max(np.abs(iq)))
+    if proc_peak > 1.0 + 1e-6:
+        scale = (1.0 - 1e-7) / proc_peak
+        iq = (iq * scale).astype(np.complex64, copy=False)
+        proc_power = float(np.mean(np.abs(iq) ** 2))
+        proc_peak = float(np.max(np.abs(iq)))
+        print(f"WARNING: IQ peak exceeded 1 after processing; scaled by {scale:.6g}")
+
+    rf_tune_hz = center_freq_hz + args.lo_offset_hz
     print(
-        f"Replay settings: fs={sample_rate_hz:.3f} Sa/s, fc={center_freq_hz/1e6:.6f} MHz, "
+        f"Replay settings: fs_file={source_rate_hz:.3f} Sa/s, fs_tx={sample_rate_hz:.3f} Sa/s, "
+        f"oversample={args.oversample}x, fc={center_freq_hz/1e6:.6f} MHz, "
+        f"rf_tune={rf_tune_hz/1e6:.6f} MHz, lo_offset={args.lo_offset_hz:.3f} Hz, "
         f"tx_gain={args.tx_gain:.2f} dB, channels={tx_channels}, "
         f"start_delay={args.start_delay:.3f}s, chunk_mult={args.chunk_mult}, "
         f"send_timeout={args.send_timeout:.3f}s"
+    )
+    print(
+        f"IQ stats (processed): avg_power={proc_power:.6g}, peak={proc_peak:.6g}, "
+        f"dc_removed=({dc_removed.real:.6g}, {dc_removed.imag:.6g}), "
+        f"manual_tx_dc_offset={tx_dc_offset if tx_dc_offset is not None else 'none'}"
     )
 
     try:
@@ -323,7 +443,7 @@ def main() -> int:
         ) from exc
 
     usrp, tx_stream, subdev, channel_antennas = setup_usrp(
-        uhd, sample_rate_hz, center_freq_hz, args.tx_gain, tx_channels
+        uhd, sample_rate_hz, rf_tune_hz, args.tx_gain, tx_channels, tx_dc_offset=tx_dc_offset
     )
     print(f"USRP configured: subdev={subdev}")
     for channel in tx_channels:
@@ -331,9 +451,11 @@ def main() -> int:
         actual_freq = _get_with_channel(usrp.get_tx_freq, channel)
         actual_gain = _get_with_channel(usrp.get_tx_gain, channel)
         tx_antenna = channel_antennas.get(channel, TX_ANTENNA)
+        effective_fc_hz = actual_freq - args.lo_offset_hz
         print(
             f"  ch{channel}: rate={actual_rate:.3f} Sa/s, "
-            f"freq={actual_freq/1e6:.6f} MHz, gain={actual_gain:.2f} dB, "
+            f"freq={actual_freq/1e6:.6f} MHz, effective_fc={effective_fc_hz/1e6:.6f} MHz, "
+            f"gain={actual_gain:.2f} dB, "
             f"antenna={tx_antenna}"
         )
 
