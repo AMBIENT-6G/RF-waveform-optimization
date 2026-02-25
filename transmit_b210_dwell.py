@@ -165,7 +165,7 @@ def send_buffered(tx_stream, samples: np.ndarray, md, max_samps: int) -> None:
         offset += sent
 
         # SOB/time_spec must only be attached to the first successfully queued samples.
-         if first:
+        if first:
             md.start_of_burst = False
             md.has_time_spec = False
             first = False
