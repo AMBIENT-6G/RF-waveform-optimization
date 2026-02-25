@@ -23,17 +23,20 @@ import numpy as np
 IQ_DIR = Path("tx_iq")
 ALLOWED_TONES = (0, 4, 8, 16, 32)
 ALLOWED_CHANNELS = (0, 1)
+ALLOWED_CPU_FORMATS = ("fc32", "sc16")
 ALLOWED_OTW_FORMATS = ("sc16", "sc8")
+SC16_DTYPE = np.dtype([("i", np.int16), ("q", np.int16)])
 
 # Fixed radio settings for simplicity.
 DEFAULT_USRP_ARGS = (
-    "num_send_frames=512,send_frame_size=32760"
+    "num_send_frames=1024,send_frame_size=32760"
 )
 DEFAULT_CHANNEL = 0
 TX_ANTENNA = "TX/RX"
 START_DELAY_S = 0.8
 DEFAULT_CHUNK_MULT = 1
 DEFAULT_SEND_TIMEOUT_S = 1.0
+DEFAULT_CPU_FORMAT = "fc32"
 DEFAULT_OTW_FORMAT = "sc8"
 
 
@@ -114,6 +117,22 @@ def try_set_thread_priority(uhd_module) -> bool:
     return False
 
 
+def complex_to_sc16_buffer(samples: np.ndarray) -> np.ndarray:
+    # Convert complex float IQ in [-1, 1] to packed int16 IQ pairs for CPU format sc16.
+    s = np.asarray(samples)
+    if s.ndim not in (1, 2):
+        raise ValueError(f"Expected 1D or 2D IQ array for sc16 conversion, got ndim={s.ndim}")
+    if not np.iscomplexobj(s):
+        raise ValueError("sc16 conversion expects complex-valued samples")
+
+    i = np.clip(np.rint(np.real(s) * 32767.0), -32768.0, 32767.0).astype(np.int16)
+    q = np.clip(np.rint(np.imag(s) * 32767.0), -32768.0, 32767.0).astype(np.int16)
+    out = np.empty(s.shape, dtype=SC16_DTYPE)
+    out["i"] = i
+    out["q"] = q
+    return np.ascontiguousarray(out)
+
+
 def find_iq_file_for_tone(iq_dir: Path, tone: int) -> Path:
     if not iq_dir.exists():
         raise FileNotFoundError(f"IQ directory not found: {iq_dir.resolve()}")
@@ -171,6 +190,7 @@ def load_iq_file(path: Path):
 def setup_usrp(
     uhd_module,
     usrp_args: str,
+    cpu_format: str,
     otw_format: str,
     spp: int,
     sample_rate_hz: float,
@@ -199,7 +219,7 @@ def setup_usrp(
         _set_with_channel(usrp.set_tx_antenna, tx_antenna, channel)
         channel_antennas[channel] = tx_antenna
 
-    stream_args = uhd_module.usrp.StreamArgs("fc32", otw_format)
+    stream_args = uhd_module.usrp.StreamArgs(cpu_format, otw_format)
     if spp > 0:
         stream_args.args = f"spp={int(spp)}"
     stream_args.channels = channels
@@ -268,18 +288,19 @@ def send_buffered(
             first = False
 
 
-def send_eob(uhd_module, tx_stream, num_channels: int) -> None:
+def send_eob(uhd_module, tx_stream, num_channels: int, cpu_format: str) -> None:
     md = uhd_module.types.TXMetadata()
     md.start_of_burst = False
     md.end_of_burst = True
     md.has_time_spec = False
 
+    dtype = SC16_DTYPE if cpu_format == "sc16" else np.complex64
     if num_channels > 1:
-        empty = np.zeros((num_channels, 0), dtype=np.complex64)
-        fallback = np.zeros((num_channels, 1), dtype=np.complex64)
+        empty = np.zeros((num_channels, 0), dtype=dtype)
+        fallback = np.zeros((num_channels, 1), dtype=dtype)
     else:
-        empty = np.zeros(0, dtype=np.complex64)
-        fallback = np.zeros(1, dtype=np.complex64)
+        empty = np.zeros(0, dtype=dtype)
+        fallback = np.zeros(1, dtype=dtype)
 
     try:
         tx_stream.send(empty, md)
@@ -321,6 +342,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "UHD device args string. Default increases TX transport buffering "
             "(num_send_frames/send_frame_size) to reduce underflows."
         ),
+    )
+    p.add_argument(
+        "--cpu-format",
+        type=str,
+        default=DEFAULT_CPU_FORMAT,
+        choices=ALLOWED_CPU_FORMATS,
+        help="Host-side streamer sample format. sc16 reduces host bandwidth/CPU vs fc32.",
     )
     p.add_argument(
         "--otw-format",
@@ -374,13 +402,18 @@ def main() -> int:
         f"tx_gain={args.tx_gain:.2f} dB, channels={tx_channels}, "
         f"start_delay={args.start_delay:.3f}s, chunk_mult={args.chunk_mult}, "
         f"send_timeout={args.send_timeout:.3f}s, "
-        f"otw_format={args.otw_format}, spp={args.spp}, "
+        f"cpu_format={args.cpu_format}, otw_format={args.otw_format}, spp={args.spp}, "
         f"uhd_args='{args.uhd_args}'"
     )
     if args.otw_format == "sc16" and sample_rate_hz >= 40e6:
         print(
             "WARNING: sc16 at >=40 MS/s is host-heavy in Python. "
             "Use --otw-format sc8 to reduce USB and CPU load."
+        )
+    if args.cpu_format == "fc32" and sample_rate_hz >= 40e6:
+        print(
+            "WARNING: cpu_format=fc32 at >=40 MS/s is Python-heavy. "
+            "Try --cpu-format sc16 with --otw-format sc8."
         )
 
     try:
@@ -396,6 +429,7 @@ def main() -> int:
     usrp, tx_stream, subdev, channel_antennas = setup_usrp(
         uhd,
         args.uhd_args,
+        args.cpu_format,
         args.otw_format,
         args.spp,
         sample_rate_hz,
@@ -429,6 +463,9 @@ def main() -> int:
 
     md = make_start_metadata(uhd, usrp, args.start_delay)
     tx_iq = np.vstack((iq, iq)) if len(tx_channels) > 1 else iq
+    if args.cpu_format == "sc16":
+        tx_iq = complex_to_sc16_buffer(tx_iq)
+        print("Prepared packed sc16 host buffer for TX.")
 
     try:
         for _ in range(n_repeats):
@@ -436,7 +473,7 @@ def main() -> int:
     finally:
         print("Stopping TX (sending end-of-burst)...")
         try:
-            send_eob(uhd, tx_stream, len(tx_channels))
+            send_eob(uhd, tx_stream, len(tx_channels), args.cpu_format)
         except Exception as exc:
             print(f"WARNING: Failed to send EOB cleanly: {exc}")
 
