@@ -25,11 +25,13 @@ ALLOWED_TONES = (0, 4, 8, 16, 32)
 ALLOWED_CHANNELS = (0, 1)
 
 # Fixed radio settings for simplicity.
-DEFAULT_USRP_ARGS = "num_send_frames=512,send_frame_size=32768"
+DEFAULT_USRP_ARGS = (
+    "num_send_frames=1024,num_recv_frames=256,send_frame_size=8192,recv_frame_size=8192"
+)
 DEFAULT_CHANNEL = 0
 TX_ANTENNA = "TX/RX"
 START_DELAY_S = 0.8
-DEFAULT_CHUNK_MULT = 256
+DEFAULT_CHUNK_MULT = 1
 DEFAULT_SEND_TIMEOUT_S = 1.0
 
 
@@ -213,7 +215,9 @@ def send_buffered(
     first = True
     total = int(samples.shape[-1]) if samples.ndim > 1 else int(samples.size)
     zero_sends = 0
-    target_samps = max(max_samps, int(send_chunk_samps))
+    # UHD streamer will not accept more than max_num_samps in one send().
+    # Keep chunking bounded to avoid oversized Python->UHD buffer handoffs.
+    target_samps = min(max_samps, max(1, int(send_chunk_samps)))
 
     while offset < total:
         n = min(target_samps, total - offset)
@@ -275,7 +279,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--chunk-mult",
         type=int,
         default=DEFAULT_CHUNK_MULT,
-        help="Requested send chunk size multiplier relative to UHD max_num_samps",
+        help=(
+            "Requested send chunk size multiplier relative to UHD max_num_samps "
+            "(effective chunk is clamped to max_num_samps)"
+        ),
     )
     p.add_argument(
         "--send-timeout",
@@ -354,13 +361,15 @@ def main() -> int:
         )
 
     max_samps = int(tx_stream.get_max_num_samps())
-    send_chunk_samps = max_samps * args.chunk_mult
+    send_chunk_samps_req = max_samps * args.chunk_mult
+    send_chunk_samps = min(max_samps, send_chunk_samps_req)
     n_repeats = max(1, int(math.ceil(args.duration * sample_rate_hz / iq.size)))
     actual_duration = n_repeats * iq.size / sample_rate_hz
     print(
         f"Playback: requested={args.duration:.6f}s, actual={actual_duration:.6f}s, "
         f"repeats={n_repeats}, max_samps_per_send={max_samps}, "
-        f"requested_send_chunk_samps={send_chunk_samps}"
+        f"requested_send_chunk_samps={send_chunk_samps_req}, "
+        f"effective_send_chunk_samps={send_chunk_samps}"
     )
 
     md = make_start_metadata(uhd, usrp, args.start_delay)
