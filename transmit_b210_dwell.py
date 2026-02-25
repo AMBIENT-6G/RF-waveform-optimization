@@ -27,14 +27,14 @@ ALLOWED_OTW_FORMATS = ("sc16", "sc8")
 
 # Fixed radio settings for simplicity.
 DEFAULT_USRP_ARGS = (
-    "num_send_frames=1024,num_recv_frames=256,send_frame_size=32760,recv_frame_size=32760"
+    "num_send_frames=512,send_frame_size=32760"
 )
 DEFAULT_CHANNEL = 0
 TX_ANTENNA = "TX/RX"
 START_DELAY_S = 0.8
 DEFAULT_CHUNK_MULT = 1
 DEFAULT_SEND_TIMEOUT_S = 1.0
-DEFAULT_OTW_FORMAT = "sc16"
+DEFAULT_OTW_FORMAT = "sc8"
 
 
 def _set_with_channel(fn, value, channel):
@@ -377,6 +377,11 @@ def main() -> int:
         f"otw_format={args.otw_format}, spp={args.spp}, "
         f"uhd_args='{args.uhd_args}'"
     )
+    if args.otw_format == "sc16" and sample_rate_hz >= 40e6:
+        print(
+            "WARNING: sc16 at >=40 MS/s is host-heavy in Python. "
+            "Use --otw-format sc8 to reduce USB and CPU load."
+        )
 
     try:
         import uhd
