@@ -25,12 +25,12 @@ ALLOWED_TONES = (0, 4, 8, 16, 32)
 ALLOWED_CHANNELS = (0, 1)
 
 # Fixed radio settings for simplicity.
-USRP_ARGS = ""
+DEFAULT_USRP_ARGS = "num_send_frames=512,send_frame_size=32768"
 DEFAULT_CHANNEL = 0
 TX_ANTENNA = "TX/RX"
-START_DELAY_S = 0.2
-DEFAULT_CHUNK_MULT = 64
-DEFAULT_SEND_TIMEOUT_S = 0.5
+START_DELAY_S = 0.8
+DEFAULT_CHUNK_MULT = 256
+DEFAULT_SEND_TIMEOUT_S = 1.0
 
 
 def _set_with_channel(fn, value, channel):
@@ -149,12 +149,13 @@ def load_iq_file(path: Path):
 
 def setup_usrp(
     uhd_module,
+    usrp_args: str,
     sample_rate_hz: float,
     center_freq_hz: float,
     tx_gain_db: float,
     channels: list[int],
 ):
-    usrp = uhd_module.usrp.MultiUSRP(USRP_ARGS)
+    usrp = uhd_module.usrp.MultiUSRP(usrp_args)
     subdev = _set_tx_subdev_for_b210(uhd_module, usrp)
     num_channels = _get_tx_num_channels(usrp)
     if any(ch < 0 or ch >= num_channels for ch in channels):
@@ -283,6 +284,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Timeout (seconds) for each tx_stream.send() call",
     )
     p.add_argument(
+        "--uhd-args",
+        type=str,
+        default=DEFAULT_USRP_ARGS,
+        help=(
+            "UHD device args string. Default increases TX transport buffering "
+            "(num_send_frames/send_frame_size) to reduce underflows."
+        ),
+    )
+    p.add_argument(
         "--channel",
         type=int,
         default=DEFAULT_CHANNEL,
@@ -318,7 +328,7 @@ def main() -> int:
         f"Replay settings: fs={sample_rate_hz:.3f} Sa/s, fc={center_freq_hz/1e6:.6f} MHz, "
         f"tx_gain={args.tx_gain:.2f} dB, channels={tx_channels}, "
         f"start_delay={args.start_delay:.3f}s, chunk_mult={args.chunk_mult}, "
-        f"send_timeout={args.send_timeout:.3f}s"
+        f"send_timeout={args.send_timeout:.3f}s, uhd_args='{args.uhd_args}'"
     )
 
     try:
@@ -329,7 +339,7 @@ def main() -> int:
         ) from exc
 
     usrp, tx_stream, subdev, channel_antennas = setup_usrp(
-        uhd, sample_rate_hz, center_freq_hz, args.tx_gain, tx_channels
+        uhd, args.uhd_args, sample_rate_hz, center_freq_hz, args.tx_gain, tx_channels
     )
     print(f"USRP configured: subdev={subdev}")
     for channel in tx_channels:
