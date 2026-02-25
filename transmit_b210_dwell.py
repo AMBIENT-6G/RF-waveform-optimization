@@ -23,16 +23,18 @@ import numpy as np
 IQ_DIR = Path("tx_iq")
 ALLOWED_TONES = (0, 4, 8, 16, 32)
 ALLOWED_CHANNELS = (0, 1)
+ALLOWED_OTW_FORMATS = ("sc16", "sc8")
 
 # Fixed radio settings for simplicity.
 DEFAULT_USRP_ARGS = (
-    "num_send_frames=1024,num_recv_frames=256,send_frame_size=8184,recv_frame_size=8184"
+    "num_send_frames=1024,num_recv_frames=256,send_frame_size=32760,recv_frame_size=32760"
 )
 DEFAULT_CHANNEL = 0
 TX_ANTENNA = "TX/RX"
 START_DELAY_S = 0.8
 DEFAULT_CHUNK_MULT = 1
 DEFAULT_SEND_TIMEOUT_S = 1.0
+DEFAULT_OTW_FORMAT = "sc16"
 
 
 def _set_with_channel(fn, value, channel):
@@ -95,6 +97,23 @@ def _tx_send(tx_stream, samples, md, timeout_s: float) -> int:
         return int(tx_stream.send(samples, md))
 
 
+def try_set_thread_priority(uhd_module) -> bool:
+    # Best effort only; fail open on platforms without RT priority privileges.
+    candidates = [
+        ("uhd.utils.set_thread_priority_safe", lambda: uhd_module.utils.set_thread_priority_safe()),
+        ("uhd.set_thread_priority_safe", lambda: uhd_module.set_thread_priority_safe()),
+    ]
+    for _, setter in candidates:
+        try:
+            result = setter()
+            # UHD helpers usually return bool, but some bindings may return None.
+            if result is None or bool(result):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def find_iq_file_for_tone(iq_dir: Path, tone: int) -> Path:
     if not iq_dir.exists():
         raise FileNotFoundError(f"IQ directory not found: {iq_dir.resolve()}")
@@ -152,6 +171,8 @@ def load_iq_file(path: Path):
 def setup_usrp(
     uhd_module,
     usrp_args: str,
+    otw_format: str,
+    spp: int,
     sample_rate_hz: float,
     center_freq_hz: float,
     tx_gain_db: float,
@@ -178,7 +199,9 @@ def setup_usrp(
         _set_with_channel(usrp.set_tx_antenna, tx_antenna, channel)
         channel_antennas[channel] = tx_antenna
 
-    stream_args = uhd_module.usrp.StreamArgs("fc32", "sc16")
+    stream_args = uhd_module.usrp.StreamArgs("fc32", otw_format)
+    if spp > 0:
+        stream_args.args = f"spp={int(spp)}"
     stream_args.channels = channels
     tx_stream = usrp.get_tx_stream(stream_args)
 
@@ -300,6 +323,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--otw-format",
+        type=str,
+        default=DEFAULT_OTW_FORMAT,
+        choices=ALLOWED_OTW_FORMATS,
+        help="UHD over-the-wire format. Use sc8 to reduce USB throughput at the cost of SNR.",
+    )
+    p.add_argument(
+        "--spp",
+        type=int,
+        default=0,
+        help="Optional samples-per-packet hint for UHD streamer (0 = UHD default).",
+    )
+    p.add_argument(
         "--channel",
         type=int,
         default=DEFAULT_CHANNEL,
@@ -324,6 +360,8 @@ def main() -> int:
         raise ValueError("--chunk-mult must be > 0")
     if args.send_timeout <= 0:
         raise ValueError("--send-timeout must be > 0")
+    if args.spp < 0:
+        raise ValueError("--spp must be >= 0")
     tx_channels = [0, 1] if args.both_channels else [args.channel]
 
     iq_file = find_iq_file_for_tone(IQ_DIR, args.tone)
@@ -335,7 +373,9 @@ def main() -> int:
         f"Replay settings: fs={sample_rate_hz:.3f} Sa/s, fc={center_freq_hz/1e6:.6f} MHz, "
         f"tx_gain={args.tx_gain:.2f} dB, channels={tx_channels}, "
         f"start_delay={args.start_delay:.3f}s, chunk_mult={args.chunk_mult}, "
-        f"send_timeout={args.send_timeout:.3f}s, uhd_args='{args.uhd_args}'"
+        f"send_timeout={args.send_timeout:.3f}s, "
+        f"otw_format={args.otw_format}, spp={args.spp}, "
+        f"uhd_args='{args.uhd_args}'"
     )
 
     try:
@@ -345,8 +385,18 @@ def main() -> int:
             "Could not import Python UHD module `uhd`. Install UHD Python bindings."
         ) from exc
 
+    rt_ok = try_set_thread_priority(uhd)
+    print(f"Thread priority: {'realtime-enabled' if rt_ok else 'default (no RT privilege)'}")
+
     usrp, tx_stream, subdev, channel_antennas = setup_usrp(
-        uhd, args.uhd_args, sample_rate_hz, center_freq_hz, args.tx_gain, tx_channels
+        uhd,
+        args.uhd_args,
+        args.otw_format,
+        args.spp,
+        sample_rate_hz,
+        center_freq_hz,
+        args.tx_gain,
+        tx_channels,
     )
     print(f"USRP configured: subdev={subdev}")
     for channel in tx_channels:
