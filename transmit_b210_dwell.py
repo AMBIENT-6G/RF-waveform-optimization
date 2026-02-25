@@ -146,15 +146,26 @@ def send_buffered(tx_stream, samples: np.ndarray, md, max_samps: int) -> None:
     offset = 0
     first = True
     total = samples.size
+    zero_sends = 0
 
     while offset < total:
         n = min(max_samps, total - offset)
-        sent = tx_stream.send(samples[offset : offset + n], md)
-        if sent != n:
-            raise RuntimeError(f"Short send: requested {n}, sent {sent}")
+        sent = int(tx_stream.send(samples[offset : offset + n], md))
+        if sent < 0:
+            raise RuntimeError(f"TX send failed: requested {n}, sent {sent}")
+        if sent == 0:
+            zero_sends += 1
+            if zero_sends >= 16:
+                raise RuntimeError(
+                    f"TX send stalled: requested {n}, sent 0 for {zero_sends} consecutive attempts"
+                )
+            continue
+
+        zero_sends = 0
         offset += sent
 
-        if first:
+        # SOB/time_spec must only be attached to the first successfully queued samples.
+         if first:
             md.start_of_burst = False
             md.has_time_spec = False
             first = False
