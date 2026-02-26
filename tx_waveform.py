@@ -22,9 +22,10 @@ import numpy as np
 
 IQ_DIR = Path("tx_iq")
 IQ_BW_REGEX = re.compile(r"^iq_N(?P<n>\d+)_BW(?P<bw>\d+)kHz(?:_.*)?\.npz$")
-DEFAULT_UHD_ARGS = "num_send_frames=1024,send_frame_size=32760"
+# Use UHD defaults by default; aggressive frame settings can trigger USB NO_MEM on some hosts.
+DEFAULT_UHD_ARGS = ""
 DEFAULT_SEND_TIMEOUT_S = 10.0
-DEFAULT_SPB = 10000
+DEFAULT_SPB = 4096
 START_DELAY_S = 0.5
 SETTLE_DELAY_S = 1.0
 TX_CHANNEL = 0
@@ -265,12 +266,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bw", required=True, type=int, help="Signal bandwidth in kHz (matches _BW<bw>kHz_)")
     parser.add_argument("--gain", required=True, type=float, help="TX gain in dB")
     parser.add_argument("--duration", default=10.0, type=float, help="Approximate replay duration in seconds")
-    parser.add_argument(
-        "--uhd-args",
-        default=DEFAULT_UHD_ARGS,
-        type=str,
-        help="UHD device args string",
-    )
+    parser.add_argument("--uhd-args", default=DEFAULT_UHD_ARGS, type=str, help="UHD device args string")
     return parser
 
 
@@ -305,7 +301,9 @@ def main() -> int:
     actual_freq = float(_get_with_channel(usrp.get_tx_freq, TX_CHANNEL))
     actual_gain = float(_get_with_channel(usrp.get_tx_gain, TX_CHANNEL))
     max_samps = int(tx_stream.get_max_num_samps())
-    spb = max(1, min(DEFAULT_SPB, iq.size))
+    if max_samps <= 0:
+        raise RuntimeError(f"Invalid tx_stream.get_max_num_samps()={max_samps}")
+    spb = max(1, min(DEFAULT_SPB, max_samps, iq.size))
 
     if not np.isclose(actual_rate, sample_rate_hz, rtol=1e-3, atol=1.0):
         print(
@@ -323,7 +321,7 @@ def main() -> int:
     print(
         f"Playback: requested={args.duration:.6f}s, actual={actual_duration:.6f}s, "
         f"repeats={n_repeats}, spb={spb}, streamer_max_samps={max_samps}, "
-        f"start_delay={START_DELAY_S:.3f}s"
+        f"start_delay={START_DELAY_S:.3f}s, uhd_args='{args.uhd_args}'"
     )
 
     md = make_start_metadata(uhd, usrp, START_DELAY_S)
