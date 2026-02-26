@@ -6,6 +6,7 @@ one selected tone block for a fixed duration.
 
 Arguments kept intentionally minimal:
 - `--tone`    : which exported tone set to play (0, 4, 8, 16, 32)
+- `--bw`      : which exported signal bandwidth to play (in kHz)
 - `--tx-gain` : TX gain in dB
 - `--duration`: playback time in seconds
 """
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 import time
 from pathlib import Path
 
@@ -23,6 +25,7 @@ import numpy as np
 IQ_DIR = Path("tx_iq")
 ALLOWED_TONES = (0, 4, 8, 16, 32)
 ALLOWED_CHANNELS = (0, 1)
+IQ_BW_REGEX = re.compile(r"^iq_N(?P<n>\d+)_BW(?P<bw>\d+)kHz(?:_.*)?\.npz$")
 ALLOWED_CPU_FORMATS = ("fc32", "sc16")
 ALLOWED_OTW_FORMATS = ("sc16", "sc8")
 SC16_DTYPE = np.dtype([("i", np.int16), ("q", np.int16)])
@@ -133,15 +136,38 @@ def complex_to_sc16_buffer(samples: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(out)
 
 
-def find_iq_file_for_tone(iq_dir: Path, tone: int) -> Path:
+def _parse_tone_bw_from_iq_name(path: Path):
+    match = IQ_BW_REGEX.match(path.name)
+    if not match:
+        return None
+    return int(match.group("n")), int(match.group("bw"))
+
+
+def find_iq_file_for_tone_bw(iq_dir: Path, tone: int, bw_khz: int) -> Path:
     if not iq_dir.exists():
         raise FileNotFoundError(f"IQ directory not found: {iq_dir.resolve()}")
 
-    matches = sorted(iq_dir.glob(f"iq_N{tone}_*.npz"))
+    matches = []
+    for path in sorted(iq_dir.glob("iq_N*_BW*kHz*.npz")):
+        parsed = _parse_tone_bw_from_iq_name(path)
+        if parsed is None:
+            continue
+        n_tones, bw = parsed
+        if n_tones == int(tone) and bw == int(bw_khz):
+            matches.append(path)
     if not matches:
+        available = sorted(
+            {
+                parsed
+                for path in iq_dir.glob("iq_N*_BW*kHz*.npz")
+                for parsed in [_parse_tone_bw_from_iq_name(path)]
+                if parsed is not None
+            }
+        )
         raise FileNotFoundError(
-            f"No IQ file found for tone {tone} in {iq_dir.resolve()} "
-            f"(expected pattern iq_N{tone}_*.npz)"
+            f"No IQ file found for tone={tone}, bw={bw_khz}kHz in {iq_dir.resolve()} "
+            "(expected pattern iq_N<tone>_BW<bw>kHz_*.npz). "
+            f"Available (tone,bw_kHz): {available}"
         )
 
     if len(matches) == 1:
@@ -153,8 +179,8 @@ def find_iq_file_for_tone(iq_dir: Path, tone: int) -> Path:
         return preferred[0].resolve()
 
     raise RuntimeError(
-        f"Multiple IQ files found for tone {tone}: {[p.name for p in matches]}. "
-        "Keep one file per tone (or only col0) in tx_iq/."
+        f"Multiple IQ files found for tone={tone}, bw={bw_khz}kHz: {[p.name for p in matches]}. "
+        "Keep one file per tone/bw (or only col0) in tx_iq/."
     )
 
 
@@ -165,6 +191,11 @@ def load_iq_file(path: Path):
 
         iq = np.asarray(data["iq"]).squeeze()
         fs_hz = float(np.asarray(data["sample_rate_hz"]).squeeze()) if "sample_rate_hz" in data.files else 20e6
+        fs_source_hz = (
+            float(np.asarray(data["sample_rate_source_hz"]).squeeze())
+            if "sample_rate_source_hz" in data.files
+            else fs_hz
+        )
         fc_hz = float(np.asarray(data["center_freq_hz"]).squeeze()) if "center_freq_hz" in data.files else 875e6
 
     if iq.ndim != 1:
@@ -184,7 +215,7 @@ def load_iq_file(path: Path):
             "Re-export IQ from notebook with proper normalization."
         )
 
-    return iq, fs_hz, fc_hz, power, peak
+    return iq, fs_hz, fs_source_hz, fc_hz, power, peak
 
 
 def setup_usrp(
@@ -311,6 +342,12 @@ def send_eob(uhd_module, tx_stream, num_channels: int, cpu_format: str) -> None:
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Replay one exported IQ tone block on B210")
     p.add_argument("--tone", type=int, required=True, choices=ALLOWED_TONES, help="Tone set to play")
+    p.add_argument(
+        "--bw",
+        type=int,
+        required=True,
+        help="Signal bandwidth in kHz (selects files named ..._BW<kHz>kHz_...)",
+    )
     p.add_argument("--tx-gain", type=float, required=True, help="TX gain in dB")
     p.add_argument("--duration", type=float, default=10.0, help="Playback duration in seconds")
     p.add_argument(
@@ -390,21 +427,34 @@ def main() -> int:
         raise ValueError("--send-timeout must be > 0")
     if args.spp < 0:
         raise ValueError("--spp must be >= 0")
+    if args.bw <= 0:
+        raise ValueError("--bw must be > 0")
     tx_channels = [0, 1] if args.both_channels else [args.channel]
 
-    iq_file = find_iq_file_for_tone(IQ_DIR, args.tone)
-    iq, sample_rate_hz, center_freq_hz, power, peak = load_iq_file(iq_file)
+    iq_file = find_iq_file_for_tone_bw(IQ_DIR, args.tone, args.bw)
+    iq, sample_rate_hz, sample_rate_source_hz, center_freq_hz, power, peak = load_iq_file(iq_file)
+    expected_rate_hz = 2.0 * float(args.bw) * 1e3
 
     print(f"Selected IQ file: {iq_file}")
     print(f"IQ stats: samples={iq.size}, avg_power={power:.6g}, peak={peak:.6g}")
+    if not np.isclose(sample_rate_hz, sample_rate_source_hz, rtol=1e-12, atol=0.0):
+        print(
+            f"Rate metadata: sample_rate_hz={sample_rate_hz:.3f}, "
+            f"sample_rate_source_hz={sample_rate_source_hz:.3f}"
+        )
     print(
-        f"Replay settings: fs={sample_rate_hz:.3f} Sa/s, fc={center_freq_hz/1e6:.6f} MHz, "
+        f"Replay settings: bw={args.bw} kHz, fs={sample_rate_hz:.3f} Sa/s, fc={center_freq_hz/1e6:.6f} MHz, "
         f"tx_gain={args.tx_gain:.2f} dB, channels={tx_channels}, "
         f"start_delay={args.start_delay:.3f}s, chunk_mult={args.chunk_mult}, "
         f"send_timeout={args.send_timeout:.3f}s, "
         f"cpu_format={args.cpu_format}, otw_format={args.otw_format}, spp={args.spp}, "
         f"uhd_args='{args.uhd_args}'"
     )
+    if not np.isclose(sample_rate_source_hz, expected_rate_hz, rtol=1e-4, atol=1.0):
+        print(
+            f"WARNING: sample_rate_source_hz={sample_rate_source_hz:.3f} does not match 2*bw "
+            f"({expected_rate_hz:.3f} for bw={args.bw} kHz)."
+        )
     if args.otw_format == "sc16" and sample_rate_hz >= 40e6:
         print(
             "WARNING: sc16 at >=40 MS/s is host-heavy in Python. "
