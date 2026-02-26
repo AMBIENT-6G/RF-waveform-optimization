@@ -255,7 +255,6 @@ def send_buffered(
     tx_stream,
     samples: np.ndarray,
     md,
-    max_samps: int,
     send_timeout_s: float,
 ) -> None:
     offset = 0
@@ -263,8 +262,9 @@ def send_buffered(
     total = int(samples.shape[-1]) if samples.ndim > 1 else int(samples.size)
     zero_sends = 0
     while offset < total:
-        n = min(max_samps, total - offset)
-        chunk = samples[:, offset : offset + n] if samples.ndim > 1 else samples[offset : offset + n]
+        # Always hand the full remaining array to UHD; UHD may short-send.
+        n = total - offset
+        chunk = samples[:, offset:] if samples.ndim > 1 else samples[offset:]
         if chunk.ndim > 1 and not chunk.flags.c_contiguous:
             chunk = np.ascontiguousarray(chunk)
         sent = _tx_send(tx_stream, chunk, md, send_timeout_s)
@@ -364,7 +364,7 @@ def main() -> int:
 
     iq_file = find_iq_file_for_tone_bw(IQ_DIR, args.tone, args.bw)
     iq, sample_rate_hz, sample_rate_source_hz, center_freq_hz, power, peak = load_iq_file(iq_file)
-    expected_rate_hz = 2.0 * float(args.bw) * 1e3
+    tx_sample_rate_hz = 2.0 * float(args.bw) * 1e3
 
     print(f"Selected IQ file: {iq_file}")
     print(f"IQ stats: samples={iq.size}, avg_power={power:.6g}, peak={peak:.6g}")
@@ -374,16 +374,16 @@ def main() -> int:
             f"sample_rate_source_hz={sample_rate_source_hz:.3f}"
         )
     print(
-        f"Replay settings: bw={args.bw} kHz, fs={sample_rate_hz:.3f} Sa/s, fc={center_freq_hz/1e6:.6f} MHz, "
+        f"Replay settings: bw={args.bw} kHz, fs={tx_sample_rate_hz:.3f} Sa/s, fc={center_freq_hz/1e6:.6f} MHz, "
         f"tx_gain={args.tx_gain:.2f} dB, channels={tx_channels}, "
         f"start_delay={args.start_delay:.3f}s, "
         f"send_timeout={args.send_timeout:.3f}s, "
         f"uhd_args='{args.uhd_args}'"
     )
-    if not np.isclose(sample_rate_source_hz, expected_rate_hz, rtol=1e-4, atol=1.0):
+    if not np.isclose(sample_rate_hz, tx_sample_rate_hz, rtol=1e-4, atol=1.0):
         print(
-            f"WARNING: sample_rate_source_hz={sample_rate_source_hz:.3f} does not match 2*bw "
-            f"({expected_rate_hz:.3f} for bw={args.bw} kHz)."
+            f"WARNING: IQ file sample_rate_hz={sample_rate_hz:.3f} does not match 2*bw "
+            f"({tx_sample_rate_hz:.3f} for bw={args.bw} kHz). Using 2*bw for TX rate."
         )
     try:
         import uhd
@@ -398,7 +398,7 @@ def main() -> int:
     usrp, tx_stream, subdev, channel_antennas = setup_usrp(
         uhd,
         args.uhd_args,
-        sample_rate_hz,
+        tx_sample_rate_hz,
         center_freq_hz,
         args.tx_gain,
         tx_channels,
@@ -415,20 +415,19 @@ def main() -> int:
             f"antenna={tx_antenna}"
         )
 
-    max_samps = int(tx_stream.get_max_num_samps())
-    n_repeats = max(1, int(math.ceil(args.duration * sample_rate_hz / iq.size)))
-    actual_duration = n_repeats * iq.size / sample_rate_hz
+    n_repeats = max(1, int(math.ceil(args.duration * tx_sample_rate_hz / iq.size)))
+    actual_duration = n_repeats * iq.size / tx_sample_rate_hz
     print(
         f"Playback: requested={args.duration:.6f}s, actual={actual_duration:.6f}s, "
-        f"repeats={n_repeats}, max_samps_per_send={max_samps}"
+        f"repeats={n_repeats}"
     )
 
     md = make_start_metadata(uhd, usrp, args.start_delay)
-    tx_iq = np.vstack((iq, iq)) if len(tx_channels) > 1 else iq
+    tx_iq = np.ascontiguousarray(np.vstack((iq, iq)) if len(tx_channels) > 1 else iq)
 
     try:
         for _ in range(n_repeats):
-            send_buffered(tx_stream, tx_iq, md, max_samps, args.send_timeout)
+            send_buffered(tx_stream, tx_iq, md, args.send_timeout)
     finally:
         print("Stopping TX (sending end-of-burst)...")
         try:
