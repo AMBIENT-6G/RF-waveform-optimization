@@ -14,6 +14,7 @@ import argparse
 import math
 import re
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -22,7 +23,10 @@ import numpy as np
 IQ_DIR = Path("tx_iq")
 IQ_BW_REGEX = re.compile(r"^iq_N(?P<n>\d+)_BW(?P<bw>\d+)kHz(?:_.*)?\.npz$")
 DEFAULT_UHD_ARGS = "num_send_frames=1024,send_frame_size=32760"
-DEFAULT_SEND_TIMEOUT_S = 1.0
+DEFAULT_SEND_TIMEOUT_S = 10.0
+DEFAULT_SPB = 10000
+START_DELAY_S = 0.5
+SETTLE_DELAY_S = 1.0
 TX_CHANNEL = 0
 TX_ANTENNA_PREFERRED = "TX/RX"
 MAX_ZERO_SENDS = 16
@@ -57,6 +61,21 @@ def _tx_send(tx_stream, samples, md, timeout_s: float) -> int:
         return int(tx_stream.send(samples, md, timeout_s))
     except TypeError:
         return int(tx_stream.send(samples, md))
+
+
+def try_set_thread_priority(uhd_module) -> bool:
+    candidates = [
+        lambda: uhd_module.utils.set_thread_priority_safe(),
+        lambda: uhd_module.set_thread_priority_safe(),
+    ]
+    for setter in candidates:
+        try:
+            result = setter()
+            if result is None or bool(result):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _parse_tone_bw_from_iq_name(path: Path) -> tuple[int, int] | None:
@@ -173,22 +192,31 @@ def setup_usrp(uhd_module, uhd_args: str, sample_rate_hz: float, center_freq_hz:
     return usrp, tx_stream, antenna
 
 
-def make_start_metadata(uhd_module):
+def make_start_metadata(uhd_module, usrp, start_delay_s: float):
     md = uhd_module.types.TXMetadata()
     md.start_of_burst = True
     md.end_of_burst = False
     md.has_time_spec = False
+    if start_delay_s > 0:
+        try:
+            now = usrp.get_time_now().get_real_secs()
+            md.time_spec = uhd_module.types.TimeSpec(now + start_delay_s)
+            md.has_time_spec = True
+        except Exception:
+            # Fallback when timed metadata APIs differ by UHD version.
+            time.sleep(start_delay_s)
+            md.has_time_spec = False
     return md
 
 
-def send_buffered(tx_stream, samples: np.ndarray, md, max_samps: int, send_timeout_s: float) -> None:
+def send_buffered(tx_stream, samples: np.ndarray, md, spb: int, send_timeout_s: float) -> None:
     offset = 0
     total = int(samples.size)
     first = True
     zero_sends = 0
 
     while offset < total:
-        n = min(max_samps, total - offset)
+        n = min(spb, total - offset)
         chunk = samples[offset : offset + n]
         if not chunk.flags.c_contiguous:
             chunk = np.ascontiguousarray(chunk)
@@ -203,6 +231,10 @@ def send_buffered(tx_stream, samples: np.ndarray, md, max_samps: int, send_timeo
                     f"TX send stalled: sent 0 samples for {zero_sends} consecutive send() calls"
                 )
             continue
+        if sent != n:
+            raise RuntimeError(
+                f"TX send timed out/partial send: requested={n}, sent={sent}"
+            )
 
         zero_sends = 0
         offset += sent
@@ -264,27 +296,40 @@ def main() -> int:
             "Could not import Python UHD module `uhd`. Install UHD Python bindings."
         ) from exc
 
+    rt_ok = try_set_thread_priority(uhd)
+    print(f"Thread priority: {'realtime-enabled' if rt_ok else 'default'}")
+
     usrp, tx_stream, antenna = setup_usrp(uhd, args.uhd_args, sample_rate_hz, center_freq_hz, args.gain)
+    time.sleep(SETTLE_DELAY_S)
     actual_rate = float(_get_with_channel(usrp.get_tx_rate, TX_CHANNEL))
     actual_freq = float(_get_with_channel(usrp.get_tx_freq, TX_CHANNEL))
     actual_gain = float(_get_with_channel(usrp.get_tx_gain, TX_CHANNEL))
     max_samps = int(tx_stream.get_max_num_samps())
+    spb = max(1, min(DEFAULT_SPB, iq.size))
 
-    n_repeats = max(1, int(math.ceil(args.duration * sample_rate_hz / iq.size)))
-    actual_duration = n_repeats * iq.size / sample_rate_hz
+    if not np.isclose(actual_rate, sample_rate_hz, rtol=1e-3, atol=1.0):
+        print(
+            f"WARNING: requested sample_rate_hz={sample_rate_hz:.3f}, "
+            f"device actual_rate={actual_rate:.3f}. Duration estimate uses actual rate."
+        )
+
+    # Use the hardware-coerced rate for repeat timing so requested duration is closer.
+    n_repeats = max(1, int(math.ceil(args.duration * actual_rate / iq.size)))
+    actual_duration = n_repeats * iq.size / actual_rate
     print(
         f"TX settings: rate={actual_rate:.3f} Sa/s, "
         f"freq={actual_freq / 1e6:.6f} MHz, gain={actual_gain:.2f} dB, antenna={antenna}"
     )
     print(
         f"Playback: requested={args.duration:.6f}s, actual={actual_duration:.6f}s, "
-        f"repeats={n_repeats}, max_samps_per_send={max_samps}"
+        f"repeats={n_repeats}, spb={spb}, streamer_max_samps={max_samps}, "
+        f"start_delay={START_DELAY_S:.3f}s"
     )
 
-    md = make_start_metadata(uhd)
+    md = make_start_metadata(uhd, usrp, START_DELAY_S)
     try:
         for _ in range(n_repeats):
-            send_buffered(tx_stream, iq, md, max_samps, DEFAULT_SEND_TIMEOUT_S)
+            send_buffered(tx_stream, iq, md, spb, DEFAULT_SEND_TIMEOUT_S)
     finally:
         print("Stopping TX (sending end-of-burst)...")
         try:
