@@ -34,7 +34,6 @@ DEFAULT_USRP_ARGS = (
 DEFAULT_CHANNEL = 0
 TX_ANTENNA = "TX/RX"
 START_DELAY_S = 0.8
-DEFAULT_CHUNK_MULT = 1
 DEFAULT_SEND_TIMEOUT_S = 1.0
 
 
@@ -257,19 +256,14 @@ def send_buffered(
     samples: np.ndarray,
     md,
     max_samps: int,
-    send_chunk_samps: int,
     send_timeout_s: float,
 ) -> None:
     offset = 0
     first = True
     total = int(samples.shape[-1]) if samples.ndim > 1 else int(samples.size)
     zero_sends = 0
-    # UHD streamer will not accept more than max_num_samps in one send().
-    # Keep chunking bounded to avoid oversized Python->UHD buffer handoffs.
-    target_samps = min(max_samps, max(1, int(send_chunk_samps)))
-
     while offset < total:
-        n = min(target_samps, total - offset)
+        n = min(max_samps, total - offset)
         chunk = samples[:, offset : offset + n] if samples.ndim > 1 else samples[offset : offset + n]
         if chunk.ndim > 1 and not chunk.flags.c_contiguous:
             chunk = np.ascontiguousarray(chunk)
@@ -332,15 +326,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Timed TX start offset in seconds to allow host queue prefill",
     )
     p.add_argument(
-        "--chunk-mult",
-        type=int,
-        default=DEFAULT_CHUNK_MULT,
-        help=(
-            "Requested send chunk size multiplier relative to UHD max_num_samps "
-            "(effective chunk is clamped to max_num_samps)"
-        ),
-    )
-    p.add_argument(
         "--send-timeout",
         type=float,
         default=DEFAULT_SEND_TIMEOUT_S,
@@ -371,8 +356,6 @@ def main() -> int:
         raise ValueError("--duration must be > 0")
     if args.start_delay < 0:
         raise ValueError("--start-delay must be >= 0")
-    if args.chunk_mult <= 0:
-        raise ValueError("--chunk-mult must be > 0")
     if args.send_timeout <= 0:
         raise ValueError("--send-timeout must be > 0")
     if args.bw <= 0:
@@ -393,7 +376,7 @@ def main() -> int:
     print(
         f"Replay settings: bw={args.bw} kHz, fs={sample_rate_hz:.3f} Sa/s, fc={center_freq_hz/1e6:.6f} MHz, "
         f"tx_gain={args.tx_gain:.2f} dB, channels={tx_channels}, "
-        f"start_delay={args.start_delay:.3f}s, chunk_mult={args.chunk_mult}, "
+        f"start_delay={args.start_delay:.3f}s, "
         f"send_timeout={args.send_timeout:.3f}s, "
         f"uhd_args='{args.uhd_args}'"
     )
@@ -433,15 +416,11 @@ def main() -> int:
         )
 
     max_samps = int(tx_stream.get_max_num_samps())
-    send_chunk_samps_req = max_samps * args.chunk_mult
-    send_chunk_samps = min(max_samps, send_chunk_samps_req)
     n_repeats = max(1, int(math.ceil(args.duration * sample_rate_hz / iq.size)))
     actual_duration = n_repeats * iq.size / sample_rate_hz
     print(
         f"Playback: requested={args.duration:.6f}s, actual={actual_duration:.6f}s, "
-        f"repeats={n_repeats}, max_samps_per_send={max_samps}, "
-        f"requested_send_chunk_samps={send_chunk_samps_req}, "
-        f"effective_send_chunk_samps={send_chunk_samps}"
+        f"repeats={n_repeats}, max_samps_per_send={max_samps}"
     )
 
     md = make_start_metadata(uhd, usrp, args.start_delay)
@@ -449,7 +428,7 @@ def main() -> int:
 
     try:
         for _ in range(n_repeats):
-            send_buffered(tx_stream, tx_iq, md, max_samps, send_chunk_samps, args.send_timeout)
+            send_buffered(tx_stream, tx_iq, md, max_samps, args.send_timeout)
     finally:
         print("Stopping TX (sending end-of-burst)...")
         try:
