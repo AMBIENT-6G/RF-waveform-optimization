@@ -255,6 +255,7 @@ def send_buffered(
     tx_stream,
     samples: np.ndarray,
     md,
+    max_samps: int,
     send_timeout_s: float,
 ) -> None:
     offset = 0
@@ -262,9 +263,9 @@ def send_buffered(
     total = int(samples.shape[-1]) if samples.ndim > 1 else int(samples.size)
     zero_sends = 0
     while offset < total:
-        # Always hand the full remaining array to UHD; UHD may short-send.
-        n = total - offset
-        chunk = samples[:, offset:] if samples.ndim > 1 else samples[offset:]
+        # Cap each send() to UHD max_num_samps to avoid oversized USB submits.
+        n = min(max_samps, total - offset)
+        chunk = samples[:, offset : offset + n] if samples.ndim > 1 else samples[offset : offset + n]
         if chunk.ndim > 1 and not chunk.flags.c_contiguous:
             chunk = np.ascontiguousarray(chunk)
         sent = _tx_send(tx_stream, chunk, md, send_timeout_s)
@@ -417,9 +418,10 @@ def main() -> int:
 
     n_repeats = max(1, int(math.ceil(args.duration * tx_sample_rate_hz / iq.size)))
     actual_duration = n_repeats * iq.size / tx_sample_rate_hz
+    max_samps = int(tx_stream.get_max_num_samps())
     print(
         f"Playback: requested={args.duration:.6f}s, actual={actual_duration:.6f}s, "
-        f"repeats={n_repeats}"
+        f"repeats={n_repeats}, max_samps_per_send={max_samps}"
     )
 
     md = make_start_metadata(uhd, usrp, args.start_delay)
@@ -427,7 +429,7 @@ def main() -> int:
 
     try:
         for _ in range(n_repeats):
-            send_buffered(tx_stream, tx_iq, md, args.send_timeout)
+            send_buffered(tx_stream, tx_iq, md, max_samps, args.send_timeout)
     finally:
         print("Stopping TX (sending end-of-burst)...")
         try:
