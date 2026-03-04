@@ -280,7 +280,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Comma-separated tone list (default: 0,4,8,16,32)",
     )
     parser.add_argument("--bw", type=int, default=1000, help="Waveform bandwidth in kHz (default: 1000)")
-    parser.add_argument("--gain-start", type=float, default=40.0, help="Start gain in dB (default: 40)")
+    parser.add_argument("--gain-start", type=float, default=50.0, help="Start gain in dB (default: 40)")
     parser.add_argument("--gain-stop", type=float, default=80.0, help="Stop gain in dB, inclusive (default: 80)")
     parser.add_argument("--gain-step", type=float, default=1.0, help="Gain step in dB (default: 1)")
     parser.add_argument("--tx-duration", type=float, default=20.0, help="TX duration in seconds (default: 20)")
