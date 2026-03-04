@@ -44,6 +44,11 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def default_output_path() -> Path:
+    timestamp_prefix = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return Path(f"{timestamp_prefix}_meas-tones-power.jsonl")
+
+
 def parse_tone_list(value: str) -> list[int]:
     tones = []
     for item in value.split(","):
@@ -281,8 +286,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--bw", type=int, default=1000, help="Waveform bandwidth in kHz (default: 1000)")
     parser.add_argument("--gain-start", type=float, default=50.0, help="Start gain in dB (default: 40)")
-    parser.add_argument("--gain-stop", type=float, default=80.0, help="Stop gain in dB, inclusive (default: 80)")
-    parser.add_argument("--gain-step", type=float, default=1.0, help="Gain step in dB (default: 1)")
+    parser.add_argument("--gain-stop", type=float, default=85.0, help="Stop gain in dB, inclusive (default: 80)")
+    parser.add_argument("--gain-step", type=float, default=0.2, help="Gain step in dB (default: 1)")
     parser.add_argument("--tx-duration", type=float, default=20.0, help="TX duration in seconds (default: 20)")
     parser.add_argument(
         "--pre-measure-delay",
@@ -307,8 +312,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("meas-tones-power.jsonl"),
-        help="Append-only JSONL output path (default: meas-tones-power.jsonl)",
+        default=None,
+        help="Append-only JSONL output path (default: <timestamp>_meas-tones-power.jsonl)",
     )
     parser.add_argument(
         "--python",
@@ -320,6 +325,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_arg_parser().parse_args()
+    if args.output is None:
+        args.output = default_output_path()
     if args.bw <= 0:
         raise ValueError("--bw must be > 0")
     if args.tx_duration <= 0:
