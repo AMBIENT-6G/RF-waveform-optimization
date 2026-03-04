@@ -287,8 +287,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pre-measure-delay",
         type=float,
-        default=2.0,
-        help="Delay after starting TX before sampling the profiler (default: 2)",
+        default=10.0,
+        help="Delay after starting TX before sampling the profiler (default: 10)",
     )
     parser.add_argument(
         "--measure-window",
