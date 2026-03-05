@@ -36,20 +36,6 @@ def default_output_path() -> Path:
     return Path(f"{timestamp_prefix}_meas-tone-power-scope.jsonl")
 
 
-def default_python_executable() -> str:
-    script_dir = Path(__file__).resolve().parent
-    candidates = [
-        script_dir / ".venv" / "Scripts" / "python.exe",
-        script_dir / ".venv" / "bin" / "python",
-        script_dir / "venv" / "Scripts" / "python.exe",
-        script_dir / "venv" / "bin" / "python",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate.resolve())
-    return sys.executable
-
-
 def parse_tone_list(value: str) -> list[int]:
     tones = []
     for item in value.split(","):
@@ -129,7 +115,7 @@ class ScopePowerMeter:
                 "Could not import TechtileScope.Scope. Ensure TechtileScope is installed and available."
             ) from exc
 
-        self.scope = Scope(config=config) if config is not None else Scope()
+        self.scope = Scope(config=config) if config is not None else Scope("192.108.0.251")
         self.channel = int(channel)
 
     def close(self) -> None:
@@ -352,11 +338,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--python",
-        default=default_python_executable(),
-        help=(
-            "Python executable used to launch tx_waveform.py "
-            "(default: local .venv/venv if present, else current interpreter)"
-        ),
+        default=sys.executable,
+        help="Python executable used to launch tx_waveform.py (default: current interpreter)",
     )
     return parser
 
@@ -395,3 +378,18 @@ if __name__ == "__main__":
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise SystemExit(1)
+********************************************* #
+    print("Cleaning up...")
+
+    _save_data_safe()
+
+    try:
+        positioner.stop()
+    except Exception:
+        pass
+
+    # iq_socket.close()
+    # context.term()
+
+    print("Shutdown complete.")
+    sys.exit(0)
