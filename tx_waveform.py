@@ -21,7 +21,8 @@ import numpy as np
 
 
 IQ_DIR = Path("tx_iq")
-IQ_BW_REGEX = re.compile(r"^iq_N(?P<n>\d+)_BW(?P<bw>\d+)kHz(?:_.*)?\.npz$")
+# Preferred naming is iq_N<N>_BW<BW>.npz; keep legacy kHz/suffix support for compatibility.
+IQ_BW_REGEX = re.compile(r"^iq_N(?P<n>\d+)_BW(?P<bw>\d+)(?:kHz)?(?:_.*)?\.npz$")
 # Use UHD defaults by default; aggressive frame settings can trigger USB NO_MEM on some hosts.
 DEFAULT_UHD_ARGS = ""
 DEFAULT_SEND_TIMEOUT_S = 10.0
@@ -91,7 +92,7 @@ def find_iq_file_for_tone_bw(iq_dir: Path, tone: int, bw_khz: int) -> Path:
         raise FileNotFoundError(f"IQ directory not found: {iq_dir.resolve()}")
 
     matches = []
-    for path in sorted(iq_dir.glob("iq_N*_BW*kHz*.npz")):
+    for path in sorted(iq_dir.glob("iq_N*_BW*.npz")):
         parsed = _parse_tone_bw_from_iq_name(path)
         if parsed is None:
             continue
@@ -103,14 +104,14 @@ def find_iq_file_for_tone_bw(iq_dir: Path, tone: int, bw_khz: int) -> Path:
         available = sorted(
             {
                 parsed
-                for path in iq_dir.glob("iq_N*_BW*kHz*.npz")
+                for path in iq_dir.glob("iq_N*_BW*.npz")
                 for parsed in [_parse_tone_bw_from_iq_name(path)]
                 if parsed is not None
             }
         )
         raise FileNotFoundError(
             f"No IQ file found for tone={tone}, bw={bw_khz}kHz in {iq_dir.resolve()} "
-            f"(expected pattern iq_N<tone>_BW<bw>kHz_*.npz). "
+            f"(expected pattern iq_N<tone>_BW<bw>.npz). "
             f"Available (tone,bw_kHz): {available}"
         )
 
@@ -263,7 +264,7 @@ def send_eob(uhd_module, tx_stream) -> None:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Replay IQ waveform NPZ on a USRP using UHD")
     parser.add_argument("--tone", required=True, type=int, help="Tone count N (matches iq_N<N>_...)")
-    parser.add_argument("--bw", required=True, type=int, help="Signal bandwidth in kHz (matches _BW<bw>kHz_)")
+    parser.add_argument("--bw", required=True, type=int, help="Signal bandwidth in kHz (matches _BW<bw>)")
     parser.add_argument("--gain", required=True, type=float, help="TX gain in dB")
     parser.add_argument("--duration", default=10.0, type=float, help="Approximate replay duration in seconds")
     parser.add_argument("--uhd-args", default=DEFAULT_UHD_ARGS, type=str, help="UHD device args string")
