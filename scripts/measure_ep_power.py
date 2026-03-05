@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Sweep tone/gain settings and log oscilloscope power measurements.
+"""Sweep tone/gain settings and log energy-profiler measurements.
 
-Behavior mirrors ``meas-tones-power.py``:
-- sweep tone/gain combinations
-- launch ``tx_waveform.py`` for each sweep
-- wait before sampling
-- sample power over a window
-- append one JSON object per sweep to output JSONL
-
-Power is read from ``TechtileScope.Scope.get_power_Watt()`` and stored as
-``pwr_pw`` (pico-watts) in each reading.
+Default behavior:
+- tones: 0, 4, 8, 16, 32
+- gains: 50 dB to 85 dB in 0.2 dB steps
+- launches ``tx_waveform.py`` for each tone/gain combination
+- waits 10 s before sampling the energy profiler
+- records profiler readings for 10 s
+- waits for the TX process to finish
+- appends one JSON object per sweep to the output file
 """
 
 from __future__ import annotations
@@ -17,14 +16,31 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import struct
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import numpy as np
+import serial
+
+from run_layout import resolve_output_path, timestamp_run_id, write_manifest
+
+
+START_BYTE = 0x02
+READING_FORMAT = ">IIII"
+READING_PAYLOAD_SIZE = struct.calcsize(READING_FORMAT)
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def xor_checksum(data: bytes) -> int:
+    checksum = 0
+    for byte in data:
+        checksum ^= byte
+    return checksum
 
 
 def utc_now_iso() -> str:
@@ -33,11 +49,11 @@ def utc_now_iso() -> str:
 
 def default_output_path() -> Path:
     timestamp_prefix = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return Path(f"{timestamp_prefix}_meas-tone-power-scope.jsonl")
+    return Path(f"{timestamp_prefix}_meas-tones-power.jsonl")
 
 
 def default_python_executable() -> str:
-    script_dir = Path(__file__).resolve().parent
+    script_dir = REPO_ROOT
     candidates = [
         script_dir / ".venv" / "Scripts" / "python.exe",
         script_dir / ".venv" / "bin" / "python",
@@ -100,106 +116,84 @@ def append_jsonl(path: Path, record: dict[str, Any]) -> None:
         handle.write("\n")
 
 
-def load_scope_config(path: Path | None, key: str) -> Any | None:
-    if path is None:
-        return None
+@dataclass
+class EnergyProfiler:
+    port: str
+    baudrate: int
+    timeout: float
 
-    try:
-        import yaml  # type: ignore
-    except Exception as exc:
-        raise ImportError(
-            "--scope-settings requires PyYAML (pip install pyyaml)"
-        ) from exc
-
-    with path.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle)
-
-    if isinstance(data, dict) and key in data:
-        return data[key]
-
-    return data
-
-
-class ScopePowerMeter:
-    def __init__(self, channel: int, config: Any | None):
-        try:
-            from TechtileScope import Scope  # type: ignore
-        except Exception as exc:
-            raise ImportError(
-                "Could not import TechtileScope.Scope. Ensure TechtileScope is installed and available."
-            ) from exc
-
-        self.scope = (
-            Scope(config=config) if config is not None else Scope("192.108.0.251")
-        )
-        self.channel = int(channel)
+    def __post_init__(self) -> None:
+        self.serial_port = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
 
     def close(self) -> None:
-        close_fn = getattr(self.scope, "close", None)
-        if callable(close_fn):
-            close_fn()
+        if self.serial_port.is_open:
+            self.serial_port.close()
 
-    def read_power_watt(self) -> float | None:
-        try:
-            values = self.scope.get_power_Watt()
-        except AttributeError as exc:
-            if "channels" in str(exc):
-                raise RuntimeError(
-                    "Scope backend appears unconfigured (missing 'channels'). "
-                    "Provide a valid scope config, e.g. "
-                    "--scope-settings experiment-settings.yaml --scope-config-key scope."
-                ) from exc
-            raise
-        if values is None:
-            return None
+    def read_raw_values(self) -> tuple[int, int, int, int] | None:
+        self.serial_port.reset_input_buffer()
 
-        if np.isscalar(values):
-            candidate = values
-        else:
-            seq = list(values)
-            if not seq:
+        while True:
+            start = self.serial_port.read(1)
+            if not start:
                 return None
-            if self.channel >= len(seq):
-                raise IndexError(
-                    f"--scope-channel={self.channel} out of range for scope output with {len(seq)} channel(s)"
-                )
-            candidate = seq[self.channel]
+            if start == bytes([START_BYTE]):
+                break
 
-        if candidate is None:
+        length_byte = self.serial_port.read(1)
+        if len(length_byte) != 1:
             return None
 
-        power_w = float(candidate)
-        if not np.isfinite(power_w):
+        frame_length = length_byte[0]
+        frame = self.serial_port.read(frame_length)
+        if len(frame) != frame_length:
             return None
-        return power_w
 
-    def get_measurement(self) -> dict[str, Any] | None:
-        power_w = self.read_power_watt()
-        if power_w is None:
+        payload = frame[:-1]
+        received_checksum = frame[-1]
+
+        if len(payload) != READING_PAYLOAD_SIZE:
+            return None
+
+        expected_checksum = xor_checksum(bytes([START_BYTE]) + length_byte + payload)
+        if expected_checksum != received_checksum:
+            return None
+
+        return struct.unpack(READING_FORMAT, payload)
+
+    def get_measurement(self) -> dict[str, int] | None:
+        raw_values = self.read_raw_values()
+        if raw_values is None:
             return None
 
         return {
             "timestamp_ms": round(time.time_ns() / 1e6),
-            "scope_channel": self.channel,
-            "scope_power_w": power_w,
-            "pwr_pw": power_w * 1e12,
+            "buffer_voltage_mv": raw_values[0],
+            "resistance": raw_values[1],
+            "pwr_pw": raw_values[2],
+            "pot_val": raw_values[3],
         }
 
+    def set_target_voltage(self, value: int) -> None:
+        command = bytearray()
+        command.append(START_BYTE)
+        command.append(0x02)
+        command.append(0x04)
+        command += struct.pack(">I", value)
+        command.append(0xFF)
 
-def collect_measurements(
-    meter: ScopePowerMeter,
-    window_s: float,
-    poll_interval_s: float,
-) -> list[dict[str, Any]]:
+        time.sleep(0.1)
+        self.serial_port.write(command)
+        self.serial_port.flush()
+
+
+def collect_measurements(profiler: EnergyProfiler, window_s: float) -> list[dict[str, int]]:
     deadline = time.monotonic() + window_s
     measurements = []
 
     while time.monotonic() < deadline:
-        measurement = meter.get_measurement()
+        measurement = profiler.get_measurement()
         if measurement is not None:
             measurements.append(measurement)
-        if poll_interval_s > 0:
-            time.sleep(poll_interval_s)
 
     return measurements
 
@@ -233,13 +227,16 @@ def wait_for_process(process: subprocess.Popen[bytes]) -> int:
 
 
 def run_sweep(args: argparse.Namespace) -> int:
-    scope_config = load_scope_config(args.scope_settings, args.scope_config_key)
-    meter = ScopePowerMeter(channel=args.scope_channel, config=scope_config)
+    profiler = EnergyProfiler(args.port, args.baudrate, args.serial_timeout)
     tx_script = Path(__file__).with_name("tx_waveform.py").resolve()
     gains = build_gain_values(args.gain_start, args.gain_stop, args.gain_step)
     completed_sweeps = 0
 
     try:
+        if args.target_voltage is not None:
+            profiler.set_target_voltage(args.target_voltage)
+            print(f"Set EP target voltage to {args.target_voltage} mV")
+
         for tone in args.tones:
             for gain in gains:
                 print(f"Starting sweep: tone={tone}, gain={gain:g} dB")
@@ -256,11 +253,7 @@ def run_sweep(args: argparse.Namespace) -> int:
                 sweep_started = time.monotonic()
                 try:
                     time.sleep(args.pre_measure_delay)
-                    readings = collect_measurements(
-                        meter,
-                        window_s=args.measure_window,
-                        poll_interval_s=args.scope_poll_interval,
-                    )
+                    readings = collect_measurements(profiler, args.measure_window)
                     exit_code = wait_for_process(process)
                 except Exception:
                     if process.poll() is None:
@@ -281,15 +274,12 @@ def run_sweep(args: argparse.Namespace) -> int:
                 record = {
                     "started_at": started_at,
                     "completed_at": utc_now_iso(),
-                    "measurement_source": "scope",
                     "tone": tone,
                     "bw_khz": args.bw,
                     "gain_db": gain,
                     "tx_duration_s": args.tx_duration,
                     "pre_measure_delay_s": args.pre_measure_delay,
                     "measure_window_s": args.measure_window,
-                    "scope_channel": args.scope_channel,
-                    "scope_poll_interval_s": args.scope_poll_interval,
                     "sweep_duration_s": round(sweep_duration_s, 3),
                     "reading_count": len(readings),
                     "readings": readings,
@@ -301,19 +291,19 @@ def run_sweep(args: argparse.Namespace) -> int:
                     f"to {args.output}"
                 )
     finally:
-        meter.close()
+        profiler.close()
 
     print(f"Completed {completed_sweeps} sweeps.")
     return 0
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Measure scope power while replaying TX waveforms")
+    parser = argparse.ArgumentParser(description="Measure energy-profiler power while replaying TX waveforms")
     parser.add_argument(
         "--tones",
         type=parse_tone_list,
-        default=[0, 1, 4, 8, 16, 32],
-        help="Comma-separated tone list (default: 0,1,4,8,16,32)",
+        default=[0, 4, 8, 16, 32],
+        help="Comma-separated tone list (default: 0,4,8,16,32)",
     )
     parser.add_argument("--bw", type=int, default=1000, help="Waveform bandwidth in kHz (default: 1000)")
     parser.add_argument("--gain-start", type=float, default=50.0, help="Start gain in dB (default: 50)")
@@ -324,45 +314,44 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--pre-measure-delay",
         type=float,
         default=10.0,
-        help="Delay after starting TX before sampling the scope (default: 10)",
+        help="Delay after starting TX before sampling the profiler (default: 10)",
     )
     parser.add_argument(
         "--measure-window",
         type=float,
         default=10.0,
-        help="How long to collect scope readings per sweep in seconds (default: 10)",
+        help="How long to collect profiler readings per sweep in seconds (default: 10)",
     )
+    parser.add_argument("--port", default="COM4", help="Energy-profiler serial port (default: COM4)")
+    parser.add_argument("--baudrate", type=int, default=115200, help="Serial baud rate (default: 115200)")
     parser.add_argument(
-        "--scope-channel",
-        type=int,
-        default=0,
-        help="Scope channel index used for power extraction from get_power_Watt() (default: 0)",
-    )
-    parser.add_argument(
-        "--scope-poll-interval",
+        "--serial-timeout",
         type=float,
-        default=0.1,
-        help="Delay between scope reads in seconds (default: 0.1)",
+        default=1.0,
+        help="Serial read timeout in seconds (default: 1)",
     )
     parser.add_argument(
-        "--scope-settings",
-        type=Path,
-        default=Path("experiment-settings.yaml"),
-        help=(
-            "YAML settings file. Its --scope-config-key section is passed to Scope(config=...). "
-            "Default: experiment-settings.yaml."
-        ),
-    )
-    parser.add_argument(
-        "--scope-config-key",
-        default="scope",
-        help="Key inside --scope-settings used as scope config (default: scope)",
+        "--target-voltage",
+        type=int,
+        default=None,
+        help="Optional EP target voltage in mV (uint32). If set, sent once before the sweep.",
     )
     parser.add_argument(
         "--output",
         type=Path,
         default=None,
-        help="Append-only JSONL output path (default: <timestamp>_meas-tone-power-scope.jsonl)",
+        help="Append-only JSONL output path (relative paths resolve inside results/<run-id>/raw/)",
+    )
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=Path("results"),
+        help="Results root directory (default: results)",
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Run identifier. If omitted, a timestamp run-id is generated.",
     )
     parser.add_argument(
         "--python",
@@ -377,9 +366,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_arg_parser().parse_args()
-
+    run_id = args.run_id if args.run_id else timestamp_run_id()
+    results_dir = args.results_dir.resolve()
     if args.output is None:
-        args.output = default_output_path()
+        args.output = resolve_output_path(
+            None,
+            results_dir=results_dir,
+            run_id=run_id,
+            bucket="raw",
+            default_name="meas-tones-power.jsonl",
+        )
+    else:
+        args.output = resolve_output_path(
+            args.output,
+            results_dir=results_dir,
+            run_id=run_id,
+            bucket="raw",
+            default_name="meas-tones-power.jsonl",
+        )
     if args.bw <= 0:
         raise ValueError("--bw must be > 0")
     if args.tx_duration <= 0:
@@ -388,14 +392,21 @@ def main() -> int:
         raise ValueError("--pre-measure-delay must be >= 0")
     if args.measure_window <= 0:
         raise ValueError("--measure-window must be > 0")
-    if args.scope_channel < 0:
-        raise ValueError("--scope-channel must be >= 0")
-    if args.scope_poll_interval < 0:
-        raise ValueError("--scope-poll-interval must be >= 0")
-    if args.scope_settings is not None and not args.scope_settings.exists():
-        raise FileNotFoundError(f"--scope-settings file not found: {args.scope_settings}")
+    if args.serial_timeout <= 0:
+        raise ValueError("--serial-timeout must be > 0")
+    if args.target_voltage is not None and not (0 <= args.target_voltage <= 0xFFFFFFFF):
+        raise ValueError("--target-voltage must be in [0, 4294967295]")
     if not Path(args.python).exists() and shutil.which(args.python) is None:
         raise FileNotFoundError(f"Python executable not found: {args.python}")
+
+    manifest_path = write_manifest(
+        results_dir=results_dir,
+        run_id=run_id,
+        script_name=Path(__file__).name,
+        argv=sys.argv[1:],
+        extra={"output": str(args.output)},
+    )
+    print(f"Updated run manifest: {manifest_path}")
 
     return run_sweep(args)
 

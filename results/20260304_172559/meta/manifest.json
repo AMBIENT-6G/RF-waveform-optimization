@@ -1,0 +1,65 @@
+{
+  "invocations": [
+    {
+      "timestamp_utc": "2026-03-05T15:10:42+00:00",
+      "script": "plot_power_stats.py",
+      "argv": [
+        "results/20260304_172559/raw/20260304_172559_meas-tones-power.jsonl",
+        "--run-id",
+        "20260304_172559",
+        "--no-show"
+      ],
+      "extra": {
+        "input": "/mnt/c/Users/Calle/OneDrive/Documenten/GitHub/RF-waveform-optimization/results/20260304_172559/raw/20260304_172559_meas-tones-power.jsonl",
+        "output": "/mnt/c/Users/Calle/OneDrive/Documenten/GitHub/RF-waveform-optimization/results/20260304_172559/plots/20260304_172559_meas-tones-power.png"
+      }
+    },
+    {
+      "timestamp_utc": "2026-03-05T15:10:44+00:00",
+      "script": "fit_tone_models.py",
+      "argv": [
+        "results/20260304_172559/raw/20260304_172559_meas-tones-power.jsonl",
+        "--run-id",
+        "20260304_172559",
+        "--no-show"
+      ],
+      "extra": {
+        "input": "/mnt/c/Users/Calle/OneDrive/Documenten/GitHub/RF-waveform-optimization/results/20260304_172559/raw/20260304_172559_meas-tones-power.jsonl",
+        "csv_out": "/mnt/c/Users/Calle/OneDrive/Documenten/GitHub/RF-waveform-optimization/results/20260304_172559/tables/20260304_172559_meas-tones-power_Prf_Pdc_by_tone.csv",
+        "json_out": "/mnt/c/Users/Calle/OneDrive/Documenten/GitHub/RF-waveform-optimization/results/20260304_172559/tables/20260304_172559_meas-tones-power_tone_fit_results.json",
+        "plot_out": "/mnt/c/Users/Calle/OneDrive/Documenten/GitHub/RF-waveform-optimization/results/20260304_172559/plots/20260304_172559_meas-tones-power_tone_fit_results.png"
+      }
+    },
+    {
+      "timestamp_utc": "2026-03-05T15:14:10+00:00",
+      "script": "fit_tone_models.py",
+      "argv": [
+        "results/20260304_172559/raw/20260304_172559_meas-tones-power.jsonl",
+        "--run-id",
+        "20260304_172559",
+        "--no-show"
+      ],
+      "extra": {
+        "input": "/mnt/c/Users/Calle/OneDrive/Documenten/GitHub/RF-waveform-optimization/results/20260304_172559/raw/20260304_172559_meas-tones-power.jsonl",
+        "csv_out": "/mnt/c/Users/Calle/OneDrive/Documenten/GitHub/RF-waveform-optimization/results/20260304_172559/tables/20260304_172559_meas-tones-power_Prf_Pdc_by_tone.csv",
+        "json_out": "/mnt/c/Users/Calle/OneDrive/Documenten/GitHub/RF-waveform-optimization/results/20260304_172559/tables/20260304_172559_meas-tones-power_tone_fit_results.json",
+        "plot_out": "/mnt/c/Users/Calle/OneDrive/Documenten/GitHub/RF-waveform-optimization/results/20260304_172559/plots/20260304_172559_meas-tones-power_tone_fit_results.png"
+      }
+    },
+    {
+      "timestamp_utc": "2026-03-05T15:14:13+00:00",
+      "script": "plot_power_stats.py",
+      "argv": [
+        "results/20260304_172559/raw/20260304_172559_meas-tones-power.jsonl",
+        "--run-id",
+        "20260304_172559",
+        "--no-show"
+      ],
+      "extra": {
+        "input": "/mnt/c/Users/Calle/OneDrive/Documenten/GitHub/RF-waveform-optimization/results/20260304_172559/raw/20260304_172559_meas-tones-power.jsonl",
+        "output": "/mnt/c/Users/Calle/OneDrive/Documenten/GitHub/RF-waveform-optimization/results/20260304_172559/plots/20260304_172559_meas-tones-power.png"
+      }
+    }
+  ],
+  "run_id": "20260304_172559"
+}

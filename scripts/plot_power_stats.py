@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -12,11 +13,14 @@ from typing import Any
 
 import numpy as np
 
+from run_layout import infer_run_id_from_path, manual_run_id, resolve_output_path, write_manifest
+
 
 DEFAULT_PERCENTILES = (25.0, 75.0)
 MEASUREMENT_STEM_SUFFIX = "meas-tones-power"
 MEASUREMENT_TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
-REFERENCE_CSV = Path(__file__).with_name("harvester-chart-data.csv")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+REFERENCE_CSV = REPO_ROOT / "data" / "reference" / "harvester-chart-data.csv"
 
 
 def pw_to_dbm(power_pw: np.ndarray | float) -> np.ndarray:
@@ -38,6 +42,54 @@ def watts_to_mw(power_w: np.ndarray | float) -> np.ndarray:
 def dbm_to_watts(power_dbm: np.ndarray | float) -> np.ndarray:
     values = np.asarray(power_dbm, dtype=float)
     return 1e-3 * np.power(10.0, values / 10.0)
+
+
+def fit_power_plus_offset(
+    input_values: np.ndarray,
+    output_values: np.ndarray,
+    alpha_min: float = -3.0,
+    alpha_max: float = 5.0,
+    grid_points: int = 2001,
+    passes: int = 4,
+) -> tuple[float, float] | None:
+    """Fit y = x**alpha + beta by minimizing squared error on alpha, beta."""
+    x = np.asarray(input_values, dtype=float)
+    y = np.asarray(output_values, dtype=float)
+    valid = np.isfinite(x) & np.isfinite(y) & (x > 0.0)
+    x = x[valid]
+    y = y[valid]
+
+    if x.size < 2 or np.unique(x).size < 2:
+        return None
+
+    low = float(alpha_min)
+    high = float(alpha_max)
+    best_alpha = np.nan
+    best_beta = np.nan
+
+    for _ in range(max(1, int(passes))):
+        alphas = np.linspace(low, high, num=max(3, int(grid_points)))
+        x_power = np.power(x[:, None], alphas[None, :])
+        betas = np.mean(y[:, None] - x_power, axis=0)
+        residual = y[:, None] - (x_power + betas[None, :])
+        sse = np.sum(residual * residual, axis=0)
+        best_index = int(np.argmin(sse))
+        best_alpha = float(alphas[best_index])
+        best_beta = float(betas[best_index])
+
+        if best_index == 0:
+            neighbor = min(1, alphas.size - 1)
+            low, high = float(alphas[0]), float(alphas[neighbor])
+        elif best_index == alphas.size - 1:
+            neighbor = max(0, alphas.size - 2)
+            low, high = float(alphas[neighbor]), float(alphas[-1])
+        else:
+            low, high = float(alphas[best_index - 1]), float(alphas[best_index + 1])
+
+    if not (np.isfinite(best_alpha) and np.isfinite(best_beta)):
+        return None
+
+    return best_alpha, best_beta
 
 
 def gain_to_input_power_dbm(gain_db: np.ndarray | float) -> np.ndarray:
@@ -83,8 +135,13 @@ def measurement_sort_key(path: Path) -> tuple[int, float]:
     return (0, path.stat().st_mtime)
 
 
-def discover_measurement_files(search_dir: Path = Path(".")) -> list[Path]:
-    candidates = [path.resolve() for path in search_dir.iterdir() if is_measurement_file(path)]
+def discover_measurement_files(search_dir: Path = Path("results")) -> list[Path]:
+    search_root = search_dir.resolve()
+    if not search_root.exists():
+        return []
+    candidates = [path.resolve() for path in search_root.rglob("*") if is_measurement_file(path)]
+    if not candidates and search_root != REPO_ROOT:
+        candidates = [path.resolve() for path in REPO_ROOT.rglob("*") if is_measurement_file(path)]
     return sorted(candidates, key=measurement_sort_key, reverse=True)
 
 
@@ -111,8 +168,8 @@ def resolve_input_paths(input_path: Path | None, include_all: bool) -> list[Path
     return [matches[0]]
 
 
-def default_output_path_for_input(input_path: Path) -> Path:
-    return input_path.with_suffix(".png")
+def default_output_name_for_input(input_path: Path) -> str:
+    return f"{input_path.stem}.png"
 
 
 def load_records(path: Path) -> list[dict[str, Any]]:
@@ -515,22 +572,37 @@ def plot_input_output_mw_markers(
         input_power_mw = watts_to_mw(dbm_to_watts(input_power_dbm))
         output_power_mw = watts_to_mw(pw_to_watts(tone_series["mean"]))
         order = np.argsort(input_power_mw)
+        sorted_input_mw = input_power_mw[order]
+        sorted_output_mw = output_power_mw[order]
         color = color_map(index % color_map.N)
         axis.plot(
-            input_power_mw[order],
-            output_power_mw[order],
+            sorted_input_mw,
+            sorted_output_mw,
             color=color,
             marker="o",
             linestyle="-",
             linewidth=1.5,
-            label=f"Tone {tone}",
+            label=f"Tone {tone} data",
         )
+        fit_result = fit_power_plus_offset(sorted_input_mw, sorted_output_mw)
+        if fit_result is not None:
+            alpha, beta = fit_result
+            fit_grid_x = np.linspace(float(np.min(sorted_input_mw)), float(np.max(sorted_input_mw)), num=200)
+            fit_grid_y = np.power(fit_grid_x, alpha) + beta
+            axis.plot(
+                fit_grid_x,
+                fit_grid_y,
+                color=color,
+                linestyle="--",
+                linewidth=1.5,
+                label=f"Tone {tone} fit: y=x**{alpha:.3g}+{beta:.3g}",
+            )
 
     fig.suptitle("Output vs input power (linear mW)")
     axis.set_xlabel("Input RF power Pin (mW)")
     axis.set_ylabel("Output DC power Pout (mW)")
     axis.grid(True, alpha=0.3)
-    axis.legend(title="Markers: Average")
+    axis.legend(title="Data + fit")
     fig.tight_layout()
     save_figure(fig, output)
     return plt, fig
@@ -568,6 +640,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Output image path for a single input file (default: <input>.png). Not allowed with --all.",
     )
     parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=Path("results"),
+        help="Results root directory (default: results)",
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Run identifier. If omitted, inferred from input path, else manual_<timestamp>.",
+    )
+    parser.add_argument(
         "--no-show",
         action="store_true",
         help="Save the figure without opening an interactive window",
@@ -585,9 +668,17 @@ def main() -> int:
     input_paths = resolve_input_paths(args.input, include_all=args.all)
     all_figures = []
     plt_module = None
+    results_dir = args.results_dir.resolve()
 
     for input_path in input_paths:
-        output_path = args.output if args.output is not None else default_output_path_for_input(input_path)
+        run_id = args.run_id or infer_run_id_from_path(input_path) or manual_run_id()
+        output_path = resolve_output_path(
+            args.output,
+            results_dir=results_dir,
+            run_id=run_id,
+            bucket="plots",
+            default_name=default_output_name_for_input(input_path),
+        )
         print(f"Processing {input_path}")
         records = load_records(input_path)
         grouped = group_power_by_tone_gain(records, power_key=args.power_key)
@@ -620,6 +711,18 @@ def main() -> int:
             all_figures.append(efficiency_fig)
         if input_output_fig is not None:
             all_figures.append(input_output_fig)
+
+        manifest_path = write_manifest(
+            results_dir=results_dir,
+            run_id=run_id,
+            script_name=Path(__file__).name,
+            argv=sys.argv[1:],
+            extra={
+                "input": str(input_path),
+                "output": str(output_path),
+            },
+        )
+        print(f"Updated run manifest: {manifest_path}")
 
     if plt_module is not None:
         if args.no_show:

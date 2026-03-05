@@ -1,0 +1,739 @@
+{
+  "tones": {
+    "0": [
+      {
+        "model": "rational_saturation",
+        "success": true,
+        "rmse_mw": 0.003342081595077336,
+        "r2": 0.9986072547095128,
+        "param_names": [
+          "a",
+          "b",
+          "c"
+        ],
+        "params": [
+          0.28050916556866096,
+          0.8975368044267796,
+          0.5291691703678302
+        ],
+        "error": null
+      },
+      {
+        "model": "polynomial_cubic",
+        "success": true,
+        "rmse_mw": 0.004611785942567795,
+        "r2": 0.9973479855660045,
+        "param_names": [
+          "a1",
+          "a2",
+          "a3"
+        ],
+        "params": [
+          0.2936248315977998,
+          -0.1255383510174883,
+          0.02120897615397037
+        ],
+        "error": null
+      },
+      {
+        "model": "paper_logistic",
+        "success": true,
+        "rmse_mw": 0.009724728140618108,
+        "r2": 0.988207862362715,
+        "param_names": [
+          "Psat",
+          "a",
+          "b"
+        ],
+        "params": [
+          0.29334971204241767,
+          1.59070467945006,
+          2.588516056779135e-16
+        ],
+        "error": null
+      },
+      {
+        "model": "piecewise_linear",
+        "success": true,
+        "rmse_mw": 0.017016541520065008,
+        "r2": 0.963893931931712,
+        "param_names": [
+          "Psens",
+          "eta",
+          "Psat"
+        ],
+        "params": [
+          0.0010000000000000002,
+          0.20176755985035744,
+          1.312206202156946
+        ],
+        "error": null
+      },
+      {
+        "model": "logistic",
+        "success": true,
+        "rmse_mw": 0.02113548410189659,
+        "r2": 0.9442991271935349,
+        "param_names": [
+          "Pmax",
+          "a",
+          "b"
+        ],
+        "params": [
+          0.26049216555692545,
+          4.029143655388557,
+          0.6369172031142596
+        ],
+        "error": null
+      },
+      {
+        "model": "logistic_sigmoind_model",
+        "success": true,
+        "rmse_mw": 0.02113548410189659,
+        "r2": 0.9442991271935349,
+        "param_names": [
+          "Pmax",
+          "a",
+          "b"
+        ],
+        "params": [
+          0.26049216555692545,
+          4.029143655388557,
+          0.6369172031142596
+        ],
+        "error": null
+      },
+      {
+        "model": "linear_efficiency",
+        "success": true,
+        "rmse_mw": 0.028779153047703274,
+        "r2": 0.8967253769127146,
+        "param_names": [
+          "eta"
+        ],
+        "params": [
+          0.13384663740577077
+        ],
+        "error": null
+      },
+      {
+        "model": "exponential",
+        "success": true,
+        "rmse_mw": 0.02877920471190505,
+        "r2": 0.8967250061161351,
+        "param_names": [
+          "A",
+          "B"
+        ],
+        "params": [
+          97700.22134417639,
+          1.369965231863095e-06
+        ],
+        "error": null
+      },
+      {
+        "model": "polynomial_even",
+        "success": true,
+        "rmse_mw": 0.04451526667272989,
+        "r2": 0.7529097778255516,
+        "param_names": [
+          "a2",
+          "a4"
+        ],
+        "params": [
+          0.11664979594103139,
+          -0.009509481282689644
+        ],
+        "error": null
+      }
+    ],
+    "4": [
+      {
+        "model": "rational_saturation",
+        "success": true,
+        "rmse_mw": 0.0025722116374391644,
+        "r2": 0.998813718651902,
+        "param_names": [
+          "a",
+          "b",
+          "c"
+        ],
+        "params": [
+          0.2395432987469812,
+          0.9025548521847288,
+          0.5565054251099308
+        ],
+        "error": null
+      },
+      {
+        "model": "polynomial_cubic",
+        "success": true,
+        "rmse_mw": 0.003860434637191153,
+        "r2": 0.9973279368873619,
+        "param_names": [
+          "a1",
+          "a2",
+          "a3"
+        ],
+        "params": [
+          0.2467173677168594,
+          -0.10551403473528395,
+          0.017690200553723903
+        ],
+        "error": null
+      },
+      {
+        "model": "paper_logistic",
+        "success": true,
+        "rmse_mw": 0.007967273457693887,
+        "r2": 0.988618650718404,
+        "param_names": [
+          "Psat",
+          "a",
+          "b"
+        ],
+        "params": [
+          0.24307783743374178,
+          1.6238121885382588,
+          4.1996764251693253e-16
+        ],
+        "error": null
+      },
+      {
+        "model": "piecewise_linear",
+        "success": true,
+        "rmse_mw": 0.014053343134984703,
+        "r2": 0.9645893739304541,
+        "param_names": [
+          "Psens",
+          "eta",
+          "Psat"
+        ],
+        "params": [
+          0.0010000000000000002,
+          0.16951699925397726,
+          1.3020990079573487
+        ],
+        "error": null
+      },
+      {
+        "model": "logistic",
+        "success": true,
+        "rmse_mw": 0.017399099440880594,
+        "r2": 0.945721499043359,
+        "param_names": [
+          "Pmax",
+          "a",
+          "b"
+        ],
+        "params": [
+          0.2165035450186461,
+          4.09417546217075,
+          0.6259743693780718
+        ],
+        "error": null
+      },
+      {
+        "model": "logistic_sigmoind_model",
+        "success": true,
+        "rmse_mw": 0.017399099440880594,
+        "r2": 0.945721499043359,
+        "param_names": [
+          "Pmax",
+          "a",
+          "b"
+        ],
+        "params": [
+          0.2165035450186461,
+          4.09417546217075,
+          0.6259743693780718
+        ],
+        "error": null
+      },
+      {
+        "model": "linear_efficiency",
+        "success": true,
+        "rmse_mw": 0.024460217474211173,
+        "r2": 0.8927258869361544,
+        "param_names": [
+          "eta"
+        ],
+        "params": [
+          0.1117148428323543
+        ],
+        "error": null
+      },
+      {
+        "model": "exponential",
+        "success": true,
+        "rmse_mw": 0.02446028334238536,
+        "r2": 0.8927253091849969,
+        "param_names": [
+          "A",
+          "B"
+        ],
+        "params": [
+          53835.84162773035,
+          2.0750011305187006e-06
+        ],
+        "error": null
+      },
+      {
+        "model": "polynomial_even",
+        "success": true,
+        "rmse_mw": 0.037413010872072126,
+        "r2": 0.7490312631711423,
+        "param_names": [
+          "a2",
+          "a4"
+        ],
+        "params": [
+          0.09784517157139588,
+          -0.008018886427649967
+        ],
+        "error": null
+      }
+    ],
+    "8": [
+      {
+        "model": "rational_saturation",
+        "success": true,
+        "rmse_mw": 0.0022583355977278184,
+        "r2": 0.9988094500014685,
+        "param_names": [
+          "a",
+          "b",
+          "c"
+        ],
+        "params": [
+          0.2153811210351977,
+          0.8952620811391236,
+          0.5822521377817379
+        ],
+        "error": null
+      },
+      {
+        "model": "polynomial_cubic",
+        "success": true,
+        "rmse_mw": 0.003493759759832613,
+        "r2": 0.9971505781179912,
+        "param_names": [
+          "a1",
+          "a2",
+          "a3"
+        ],
+        "params": [
+          0.22213342130401295,
+          -0.09776620292009959,
+          0.016598332264974522
+        ],
+        "error": null
+      },
+      {
+        "model": "paper_logistic",
+        "success": true,
+        "rmse_mw": 0.007220198021662592,
+        "r2": 0.9878306075826556,
+        "param_names": [
+          "Psat",
+          "a",
+          "b"
+        ],
+        "params": [
+          0.21044262492598603,
+          1.6914620934357427,
+          1.7718122938669728e-15
+        ],
+        "error": null
+      },
+      {
+        "model": "piecewise_linear",
+        "success": true,
+        "rmse_mw": 0.012529175506989034,
+        "r2": 0.9633549208650035,
+        "param_names": [
+          "Psens",
+          "eta",
+          "Psat"
+        ],
+        "params": [
+          0.0010000000000000002,
+          0.15339047427557168,
+          1.2480914221383803
+        ],
+        "error": null
+      },
+      {
+        "model": "logistic",
+        "success": true,
+        "rmse_mw": 0.015236597999770217,
+        "r2": 0.9458065627924398,
+        "param_names": [
+          "Pmax",
+          "a",
+          "b"
+        ],
+        "params": [
+          0.18857657398675795,
+          4.19397813359019,
+          0.6060152208984626
+        ],
+        "error": null
+      },
+      {
+        "model": "logistic_sigmoind_model",
+        "success": true,
+        "rmse_mw": 0.015236597999770217,
+        "r2": 0.9458065627924398,
+        "param_names": [
+          "Pmax",
+          "a",
+          "b"
+        ],
+        "params": [
+          0.18857657398675795,
+          4.19397813359019,
+          0.6060152208984626
+        ],
+        "error": null
+      },
+      {
+        "model": "linear_efficiency",
+        "success": true,
+        "rmse_mw": 0.02223352361089673,
+        "r2": 0.8846049259504903,
+        "param_names": [
+          "eta"
+        ],
+        "params": [
+          0.09812726827176259
+        ],
+        "error": null
+      },
+      {
+        "model": "exponential",
+        "success": true,
+        "rmse_mw": 0.022233573239345317,
+        "r2": 0.88460441079284,
+        "param_names": [
+          "A",
+          "B"
+        ],
+        "params": [
+          54860.59185318507,
+          1.7885866343841152e-06
+        ],
+        "error": null
+      },
+      {
+        "model": "polynomial_even",
+        "success": true,
+        "rmse_mw": 0.03361653102245109,
+        "r2": 0.736198980797615,
+        "param_names": [
+          "a2",
+          "a4"
+        ],
+        "params": [
+          0.08606632284431509,
+          -0.00707657544691729
+        ],
+        "error": null
+      }
+    ],
+    "16": [
+      {
+        "model": "rational_saturation",
+        "success": true,
+        "rmse_mw": 0.0019441028724031385,
+        "r2": 0.9987080324401808,
+        "param_names": [
+          "a",
+          "b",
+          "c"
+        ],
+        "params": [
+          0.17588378333812535,
+          0.8876439578350439,
+          0.5642858500411141
+        ],
+        "error": null
+      },
+      {
+        "model": "polynomial_cubic",
+        "success": true,
+        "rmse_mw": 0.0029629086991618766,
+        "r2": 0.9969991128536525,
+        "param_names": [
+          "a1",
+          "a2",
+          "a3"
+        ],
+        "params": [
+          0.18374255397313302,
+          -0.0809997153292916,
+          0.013795415884138143
+        ],
+        "error": null
+      },
+      {
+        "model": "paper_logistic",
+        "success": true,
+        "rmse_mw": 0.00606311939442195,
+        "r2": 0.9874337595362678,
+        "param_names": [
+          "Psat",
+          "a",
+          "b"
+        ],
+        "params": [
+          0.1744064655945142,
+          1.6851801900214578,
+          1.909580976386081e-15
+        ],
+        "error": null
+      },
+      {
+        "model": "piecewise_linear",
+        "success": true,
+        "rmse_mw": 0.010451723559479568,
+        "r2": 0.9626587412169526,
+        "param_names": [
+          "Psens",
+          "eta",
+          "Psat"
+        ],
+        "params": [
+          0.0010000000000000002,
+          0.12674827884440962,
+          1.2506775106276669
+        ],
+        "error": null
+      },
+      {
+        "model": "logistic",
+        "success": true,
+        "rmse_mw": 0.012579665204633456,
+        "r2": 0.9459057266774599,
+        "param_names": [
+          "Pmax",
+          "a",
+          "b"
+        ],
+        "params": [
+          0.15622704318819366,
+          4.163544675715676,
+          0.607724075300845
+        ],
+        "error": null
+      },
+      {
+        "model": "logistic_sigmoind_model",
+        "success": true,
+        "rmse_mw": 0.012579665204633456,
+        "r2": 0.9459057266774599,
+        "param_names": [
+          "Pmax",
+          "a",
+          "b"
+        ],
+        "params": [
+          0.15622704318819366,
+          4.163544675715676,
+          0.607724075300845
+        ],
+        "error": null
+      },
+      {
+        "model": "linear_efficiency",
+        "success": true,
+        "rmse_mw": 0.01834397404381663,
+        "r2": 0.8849729506279433,
+        "param_names": [
+          "eta"
+        ],
+        "params": [
+          0.08123110136563783
+        ],
+        "error": null
+      },
+      {
+        "model": "exponential",
+        "success": true,
+        "rmse_mw": 0.01834401321230912,
+        "r2": 0.8849724594104004,
+        "param_names": [
+          "A",
+          "B"
+        ],
+        "params": [
+          47305.62301003577,
+          1.7171458586392125e-06
+        ],
+        "error": null
+      },
+      {
+        "model": "polynomial_even",
+        "success": true,
+        "rmse_mw": 0.0278024585937523,
+        "r2": 0.7357715784254522,
+        "param_names": [
+          "a2",
+          "a4"
+        ],
+        "params": [
+          0.0711417287991119,
+          -0.005840669104024839
+        ],
+        "error": null
+      }
+    ],
+    "32": [
+      {
+        "model": "rational_saturation",
+        "success": true,
+        "rmse_mw": 0.0018684050403878336,
+        "r2": 0.9984601804469644,
+        "param_names": [
+          "a",
+          "b",
+          "c"
+        ],
+        "params": [
+          0.15151229597370697,
+          0.8926521645919698,
+          0.5409088990916341
+        ],
+        "error": null
+      },
+      {
+        "model": "polynomial_cubic",
+        "success": true,
+        "rmse_mw": 0.002632104618350767,
+        "r2": 0.9969441357054334,
+        "param_names": [
+          "a1",
+          "a2",
+          "a3"
+        ],
+        "params": [
+          0.1583927014892106,
+          -0.06819717761448263,
+          0.011497465553475833
+        ],
+        "error": null
+      },
+      {
+        "model": "paper_logistic",
+        "success": true,
+        "rmse_mw": 0.005227449638572491,
+        "r2": 0.9879466578517343,
+        "param_names": [
+          "Psat",
+          "a",
+          "b"
+        ],
+        "params": [
+          0.15525872170966892,
+          1.6303260999992693,
+          6.275447095211944e-16
+        ],
+        "error": null
+      },
+      {
+        "model": "piecewise_linear",
+        "success": true,
+        "rmse_mw": 0.00909337263416079,
+        "r2": 0.9635264743050015,
+        "param_names": [
+          "Psens",
+          "eta",
+          "Psat"
+        ],
+        "params": [
+          0.0010000000000000002,
+          0.10875331861936265,
+          1.2964671711634608
+        ],
+        "error": null
+      },
+      {
+        "model": "logistic",
+        "success": true,
+        "rmse_mw": 0.010987937498405074,
+        "r2": 0.9467450317017074,
+        "param_names": [
+          "Pmax",
+          "a",
+          "b"
+        ],
+        "params": [
+          0.13837983189690814,
+          4.082424266998673,
+          0.6230436010212035
+        ],
+        "error": null
+      },
+      {
+        "model": "logistic_sigmoind_model",
+        "success": true,
+        "rmse_mw": 0.010987937498405074,
+        "r2": 0.9467450317017074,
+        "param_names": [
+          "Pmax",
+          "a",
+          "b"
+        ],
+        "params": [
+          0.13837983189690814,
+          4.082424266998673,
+          0.6230436010212035
+        ],
+        "error": null
+      },
+      {
+        "model": "linear_efficiency",
+        "success": true,
+        "rmse_mw": 0.015703135805595698,
+        "r2": 0.8912321502623748,
+        "param_names": [
+          "eta"
+        ],
+        "params": [
+          0.07146935256810899
+        ],
+        "error": null
+      },
+      {
+        "model": "exponential",
+        "success": true,
+        "rmse_mw": 0.015703167264260815,
+        "r2": 0.8912317144647315,
+        "param_names": [
+          "A",
+          "B"
+        ],
+        "params": [
+          45726.1799380933,
+          1.5629769418278453e-06
+        ],
+        "error": null
+      },
+      {
+        "model": "polynomial_even",
+        "success": true,
+        "rmse_mw": 0.024015282369027093,
+        "r2": 0.7456081670753935,
+        "param_names": [
+          "a2",
+          "a4"
+        ],
+        "params": [
+          0.0625225971335387,
+          -0.005119430698935078
+        ],
+        "error": null
+      }
+    ]
+  }
+}

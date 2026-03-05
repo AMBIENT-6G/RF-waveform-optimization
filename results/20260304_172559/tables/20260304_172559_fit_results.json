@@ -1,0 +1,115 @@
+{
+  "results": [
+    {
+      "model": "linear_efficiency",
+      "success": true,
+      "rmse_mw": 0.028586803792595053,
+      "r2": 0.8272307576159311,
+      "param_names": [
+        "eta"
+      ],
+      "params": [
+        0.09927784047821796
+      ],
+      "error": null
+    },
+    {
+      "model": "polynomial_even",
+      "success": true,
+      "rmse_mw": 0.03818169226824503,
+      "r2": 0.6917908177627772,
+      "param_names": [
+        "a2",
+        "a4"
+      ],
+      "params": [
+        0.08684512324622198,
+        -0.007113008590104846
+      ],
+      "error": null
+    },
+    {
+      "model": "polynomial_cubic",
+      "success": true,
+      "rmse_mw": 0.018702254787480697,
+      "r2": 0.926052556270648,
+      "param_names": [
+        "a1",
+        "a2",
+        "a3"
+      ],
+      "params": [
+        0.2209221752162893,
+        -0.09560309632339858,
+        0.016158078082072078
+      ],
+      "error": null
+    },
+    {
+      "model": "logistic",
+      "success": true,
+      "rmse_mw": 0.02401634435445971,
+      "r2": 0.8780592024775896,
+      "param_names": [
+        "Pmax",
+        "a",
+        "b"
+      ],
+      "params": [
+        0.1920218847206499,
+        4.105375011209479,
+        0.621457972308401
+      ],
+      "error": null
+    },
+    {
+      "model": "rational_saturation",
+      "success": true,
+      "rmse_mw": 0.018525773871153735,
+      "r2": 0.9274415587363991,
+      "param_names": [
+        "a",
+        "b",
+        "c"
+      ],
+      "params": [
+        0.21253003671583165,
+        0.8958563881310008,
+        0.5530278267036669
+      ],
+      "error": null
+    },
+    {
+      "model": "exponential",
+      "success": true,
+      "rmse_mw": 0.028586852467259612,
+      "r2": 0.8272301692680949,
+      "param_names": [
+        "A",
+        "B"
+      ],
+      "params": [
+        43706.49978026944,
+        2.2714491522595766e-06
+      ],
+      "error": null
+    },
+    {
+      "model": "piecewise_linear",
+      "success": true,
+      "rmse_mw": 0.022286297273036583,
+      "r2": 0.8949947373729228,
+      "param_names": [
+        "Psens",
+        "eta",
+        "Psat"
+      ],
+      "params": [
+        0.0010000000000000048,
+        0.15106995389354647,
+        1.2970880450534892
+      ],
+      "error": null
+    }
+  ]
+}

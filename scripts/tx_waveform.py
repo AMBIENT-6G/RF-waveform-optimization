@@ -20,7 +20,8 @@ from pathlib import Path
 import numpy as np
 
 
-IQ_DIR = Path("tx_iq")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+IQ_DIR = REPO_ROOT / "data" / "tx_iq"
 # Preferred naming is iq_N<N>_BW<BW>.npz; keep legacy kHz/suffix support for compatibility.
 IQ_BW_REGEX = re.compile(r"^iq_N(?P<n>\d+)_BW(?P<bw>\d+)(?:kHz)?(?:_.*)?\.npz$")
 # Use UHD defaults by default; aggressive frame settings can trigger USB NO_MEM on some hosts.
@@ -124,7 +125,7 @@ def find_iq_file_for_tone_bw(iq_dir: Path, tone: int, bw_khz: int) -> Path:
 
     raise RuntimeError(
         f"Multiple IQ files found for tone={tone}, bw={bw_khz}kHz: {[p.name for p in matches]}. "
-        "Keep one file per tone/bw (or one _col0 file) in tx_iq/."
+        "Keep one file per tone/bw (or one _col0 file) in data/tx_iq/."
     )
 
 
