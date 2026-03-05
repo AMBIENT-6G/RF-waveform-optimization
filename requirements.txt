@@ -3,3 +3,4 @@ scipy
 matplotlib
 pyserial
 PyYAML
+TechtileScope @ git+https://github.com/techtile-by-dramco/scope
