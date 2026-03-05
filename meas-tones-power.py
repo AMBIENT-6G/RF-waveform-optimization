@@ -49,6 +49,20 @@ def default_output_path() -> Path:
     return Path(f"{timestamp_prefix}_meas-tones-power.jsonl")
 
 
+def default_python_executable() -> str:
+    script_dir = Path(__file__).resolve().parent
+    candidates = [
+        script_dir / ".venv" / "Scripts" / "python.exe",
+        script_dir / ".venv" / "bin" / "python",
+        script_dir / "venv" / "Scripts" / "python.exe",
+        script_dir / "venv" / "bin" / "python",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate.resolve())
+    return sys.executable
+
+
 def parse_tone_list(value: str) -> list[int]:
     tones = []
     for item in value.split(","):
@@ -327,8 +341,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--python",
-        default=sys.executable,
-        help="Python executable used to launch tx_waveform.py (default: current interpreter)",
+        default=default_python_executable(),
+        help=(
+            "Python executable used to launch tx_waveform.py "
+            "(default: local .venv/venv if present, else current interpreter)"
+        ),
     )
     return parser
 
