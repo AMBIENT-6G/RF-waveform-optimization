@@ -31,6 +31,10 @@ def pw_to_watts(power_pw: np.ndarray | float) -> np.ndarray:
     return np.asarray(power_pw, dtype=float) * 1e-12
 
 
+def watts_to_mw(power_w: np.ndarray | float) -> np.ndarray:
+    return np.asarray(power_w, dtype=float) * 1e3
+
+
 def dbm_to_watts(power_dbm: np.ndarray | float) -> np.ndarray:
     values = np.asarray(power_dbm, dtype=float)
     return 1e-3 * np.power(10.0, values / 10.0)
@@ -263,6 +267,12 @@ def efficiency_output_path(output: Path | None) -> Path | None:
     return output.with_name(f"{output.stem}_efficiency{output.suffix}")
 
 
+def input_output_mw_output_path(output: Path | None) -> Path | None:
+    if output is None:
+        return None
+    return output.with_name(f"{output.stem}_input_output_mw_markers{output.suffix}")
+
+
 def load_reference_efficiency(path: Path) -> tuple[np.ndarray, np.ndarray] | None:
     if not path.exists():
         return None
@@ -485,6 +495,47 @@ def plot_efficiency_markers(
     return plt, fig
 
 
+def plot_input_output_mw_markers(
+    series: dict[int, dict[str, np.ndarray]],
+    power_key: str,
+    output: Path | None,
+):
+    if not series:
+        raise ValueError("No usable records found in the input file")
+    if power_key != "pwr_pw":
+        print(f"Skipping input/output marker plot: supported only for power_key='pwr_pw', got {power_key!r}")
+        return None, None
+
+    plt, fig, axis = make_axes()
+    color_map = plt.get_cmap("tab10")
+
+    for index, tone in enumerate(sorted(series)):
+        tone_series = series[tone]
+        input_power_dbm = gain_to_input_power_dbm(tone_series["gains"])
+        input_power_mw = watts_to_mw(dbm_to_watts(input_power_dbm))
+        output_power_mw = watts_to_mw(pw_to_watts(tone_series["mean"]))
+        order = np.argsort(input_power_mw)
+        color = color_map(index % color_map.N)
+        axis.plot(
+            input_power_mw[order],
+            output_power_mw[order],
+            color=color,
+            marker="o",
+            linestyle="-",
+            linewidth=1.5,
+            label=f"Tone {tone}",
+        )
+
+    fig.suptitle("Output vs input power (linear mW)")
+    axis.set_xlabel("Input RF power Pin (mW)")
+    axis.set_ylabel("Output DC power Pout (mW)")
+    axis.grid(True, alpha=0.3)
+    axis.legend(title="Markers: Average")
+    fig.tight_layout()
+    save_figure(fig, output)
+    return plt, fig
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Plot power statistics versus configured gain for each tone")
     parser.add_argument(
@@ -558,10 +609,17 @@ def main() -> int:
             power_key=args.power_key,
             output=efficiency_output_path(output_path),
         )
+        _, input_output_fig = plot_input_output_mw_markers(
+            series,
+            power_key=args.power_key,
+            output=input_output_mw_output_path(output_path),
+        )
         all_figures.append(band_fig)
         all_figures.append(marker_fig)
         if efficiency_fig is not None:
             all_figures.append(efficiency_fig)
+        if input_output_fig is not None:
+            all_figures.append(input_output_fig)
 
     if plt_module is not None:
         if args.no_show:
