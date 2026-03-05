@@ -3,4 +3,5 @@ scipy
 matplotlib
 pyserial
 pyyaml
+pyvisa-py
 git+https://github.com/techtile-by-dramco/scope
