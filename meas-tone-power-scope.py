@@ -36,18 +36,6 @@ def default_output_path() -> Path:
     return Path(f"{timestamp_prefix}_meas-tone-power-scope.jsonl")
 
 
-def default_scope_settings_path() -> Path | None:
-    script_dir = Path(__file__).resolve().parent
-    candidates = [
-        script_dir / "experiment-settings.yaml",
-        Path.cwd() / "experiment-settings.yaml",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate.resolve()
-    return None
-
-
 def default_python_executable() -> str:
     script_dir = Path(__file__).resolve().parent
     candidates = [
@@ -359,10 +347,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--scope-settings",
         type=Path,
-        default=default_scope_settings_path(),
+        default=Path("experiment-settings.yaml"),
         help=(
             "YAML settings file. Its --scope-config-key section is passed to Scope(config=...). "
-            "Default: experiment-settings.yaml when present."
+            "Default: experiment-settings.yaml."
         ),
     )
     parser.add_argument(
