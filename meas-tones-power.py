@@ -216,6 +216,10 @@ def run_sweep(args: argparse.Namespace) -> int:
     completed_sweeps = 0
 
     try:
+        if args.target_voltage is not None:
+            profiler.set_target_voltage(args.target_voltage)
+            print(f"Set EP target voltage to {args.target_voltage} mV")
+
         for tone in args.tones:
             for gain in gains:
                 print(f"Starting sweep: tone={tone}, gain={gain:g} dB")
@@ -310,6 +314,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Serial read timeout in seconds (default: 1)",
     )
     parser.add_argument(
+        "--target-voltage",
+        type=int,
+        default=None,
+        help="Optional EP target voltage in mV (uint32). If set, sent once before the sweep.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -337,6 +347,8 @@ def main() -> int:
         raise ValueError("--measure-window must be > 0")
     if args.serial_timeout <= 0:
         raise ValueError("--serial-timeout must be > 0")
+    if args.target_voltage is not None and not (0 <= args.target_voltage <= 0xFFFFFFFF):
+        raise ValueError("--target-voltage must be in [0, 4294967295]")
     if not Path(args.python).exists() and shutil.which(args.python) is None:
         raise FileNotFoundError(f"Python executable not found: {args.python}")
 
