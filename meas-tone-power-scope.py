@@ -36,6 +36,18 @@ def default_output_path() -> Path:
     return Path(f"{timestamp_prefix}_meas-tone-power-scope.jsonl")
 
 
+def default_scope_settings_path() -> Path | None:
+    script_dir = Path(__file__).resolve().parent
+    candidates = [
+        script_dir / "experiment-settings.yaml",
+        Path.cwd() / "experiment-settings.yaml",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return None
+
+
 def default_python_executable() -> str:
     script_dir = Path(__file__).resolve().parent
     candidates = [
@@ -140,7 +152,16 @@ class ScopePowerMeter:
             close_fn()
 
     def read_power_watt(self) -> float | None:
-        values = self.scope.get_power_Watt()
+        try:
+            values = self.scope.get_power_Watt()
+        except AttributeError as exc:
+            if "channels" in str(exc):
+                raise RuntimeError(
+                    "Scope backend appears unconfigured (missing 'channels'). "
+                    "Provide a valid scope config, e.g. "
+                    "--scope-settings experiment-settings.yaml --scope-config-key scope."
+                ) from exc
+            raise
         if values is None:
             return None
 
@@ -338,8 +359,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--scope-settings",
         type=Path,
-        default=None,
-        help="Optional YAML settings file. If provided, its --scope-config-key section is passed to Scope(config=...).",
+        default=default_scope_settings_path(),
+        help=(
+            "YAML settings file. Its --scope-config-key section is passed to Scope(config=...). "
+            "Default: experiment-settings.yaml when present."
+        ),
     )
     parser.add_argument(
         "--scope-config-key",
