@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,8 @@ import numpy as np
 
 
 DEFAULT_PERCENTILES = (25.0, 75.0)
+MEASUREMENT_STEM_SUFFIX = "meas-tones-power"
+MEASUREMENT_TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 REFERENCE_CSV = Path(__file__).with_name("harvester-chart-data.csv")
 
 
@@ -35,7 +38,6 @@ def dbm_to_watts(power_dbm: np.ndarray | float) -> np.ndarray:
 
 def gain_to_input_power_dbm(gain_db: np.ndarray | float) -> np.ndarray:
     values = np.asarray(gain_db, dtype=float)
-    # User-provided assumption: configured gain G = 80 dB - input power (dBm).
     return values - 80.0
 
 
@@ -50,6 +52,63 @@ def parse_percentiles(value: str) -> tuple[float, float]:
             raise argparse.ArgumentTypeError("Percentiles must be between 0 and 100")
 
     return percentiles
+
+
+def is_measurement_file(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() in {".json", ".jsonl"} and path.stem.endswith(MEASUREMENT_STEM_SUFFIX)
+
+
+def measurement_timestamp(path: Path) -> datetime | None:
+    if not path.stem.endswith(MEASUREMENT_STEM_SUFFIX):
+        return None
+
+    prefix = path.stem[: -len(MEASUREMENT_STEM_SUFFIX)].rstrip("_-")
+    if not prefix:
+        return None
+
+    try:
+        return datetime.strptime(prefix, MEASUREMENT_TIMESTAMP_FORMAT)
+    except ValueError:
+        return None
+
+
+def measurement_sort_key(path: Path) -> tuple[int, float]:
+    timestamp = measurement_timestamp(path)
+    if timestamp is not None:
+        return (1, timestamp.timestamp())
+    return (0, path.stat().st_mtime)
+
+
+def discover_measurement_files(search_dir: Path = Path(".")) -> list[Path]:
+    candidates = [path.resolve() for path in search_dir.iterdir() if is_measurement_file(path)]
+    return sorted(candidates, key=measurement_sort_key, reverse=True)
+
+
+def resolve_input_paths(input_path: Path | None, include_all: bool) -> list[Path]:
+    if include_all:
+        matches = discover_measurement_files()
+        if not matches:
+            raise FileNotFoundError(
+                f"No measurement files found in {Path('.').resolve()} matching '*{MEASUREMENT_STEM_SUFFIX}*.jsonl'"
+            )
+        return matches
+
+    if input_path is not None:
+        resolved = input_path.resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(f"Input file not found: {input_path}")
+        return [resolved]
+
+    matches = discover_measurement_files()
+    if not matches:
+        raise FileNotFoundError(
+            f"No measurement files found in {Path('.').resolve()} matching '*{MEASUREMENT_STEM_SUFFIX}*.jsonl'"
+        )
+    return [matches[0]]
+
+
+def default_output_path_for_input(input_path: Path) -> Path:
+    return input_path.with_suffix(".png")
 
 
 def load_records(path: Path) -> list[dict[str, Any]]:
@@ -432,8 +491,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "input",
         nargs="?",
         type=Path,
-        default=Path("meas-tones-power.jsonl"),
-        help="Measurement file (.json, .jsonl, or mapping-style JSON) (default: meas-tones-power.jsonl)",
+        default=None,
+        help="Measurement file (.json, .jsonl, or mapping-style JSON). If omitted, uses the newest '*meas-tones-power*' file.",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Plot every '*meas-tones-power*' measurement file in the current directory, newest first",
     )
     parser.add_argument(
         "--power-key",
@@ -449,8 +513,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("meas-tones-power.png"),
-        help="Output image path (default: meas-tones-power.png)",
+        default=None,
+        help="Output image path for a single input file (default: <input>.png). Not allowed with --all.",
     )
     parser.add_argument(
         "--no-show",
@@ -462,36 +526,49 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_arg_parser().parse_args()
-    if not args.input.exists():
-        raise FileNotFoundError(f"Input file not found: {args.input}")
+    if args.all and args.input is not None:
+        raise ValueError("Do not pass an input file together with --all")
+    if args.all and args.output is not None:
+        raise ValueError("--output cannot be used with --all because each input file gets its own output name")
 
-    records = load_records(args.input)
-    grouped = group_power_by_tone_gain(records, power_key=args.power_key)
-    series = build_series(grouped, percentiles=args.percentiles)
-    plt, band_fig = plot_series(
-        series,
-        percentiles=args.percentiles,
-        power_key=args.power_key,
-        output=args.output,
-    )
-    _, marker_fig = plot_average_markers(
-        series,
-        power_key=args.power_key,
-        output=marker_output_path(args.output),
-    )
-    _, efficiency_fig = plot_efficiency_markers(
-        series,
-        percentiles=args.percentiles,
-        power_key=args.power_key,
-        output=efficiency_output_path(args.output),
-    )
-    if args.no_show:
-        plt.close(band_fig)
-        plt.close(marker_fig)
+    input_paths = resolve_input_paths(args.input, include_all=args.all)
+    all_figures = []
+    plt_module = None
+
+    for input_path in input_paths:
+        output_path = args.output if args.output is not None else default_output_path_for_input(input_path)
+        print(f"Processing {input_path}")
+        records = load_records(input_path)
+        grouped = group_power_by_tone_gain(records, power_key=args.power_key)
+        series = build_series(grouped, percentiles=args.percentiles)
+        plt_module, band_fig = plot_series(
+            series,
+            percentiles=args.percentiles,
+            power_key=args.power_key,
+            output=output_path,
+        )
+        _, marker_fig = plot_average_markers(
+            series,
+            power_key=args.power_key,
+            output=marker_output_path(output_path),
+        )
+        _, efficiency_fig = plot_efficiency_markers(
+            series,
+            percentiles=args.percentiles,
+            power_key=args.power_key,
+            output=efficiency_output_path(output_path),
+        )
+        all_figures.append(band_fig)
+        all_figures.append(marker_fig)
         if efficiency_fig is not None:
-            plt.close(efficiency_fig)
-    else:
-        plt.show()
+            all_figures.append(efficiency_fig)
+
+    if plt_module is not None:
+        if args.no_show:
+            for figure in all_figures:
+                plt_module.close(figure)
+        else:
+            plt_module.show()
     return 0
 
 
