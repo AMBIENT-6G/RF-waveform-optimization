@@ -129,7 +129,9 @@ class ScopePowerMeter:
                 "Could not import TechtileScope.Scope. Ensure TechtileScope is installed and available."
             ) from exc
 
-        self.scope = Scope(config=config) if config is not None else Scope()
+        self.scope = (
+            Scope(config=config) if config is not None else Scope("192.108.0.251")
+        )
         self.channel = int(channel)
 
     def close(self) -> None:
