@@ -1,0 +1,13 @@
+{
+  "invocations": [
+    {
+      "timestamp_utc": "2026-03-05T15:56:26+00:00",
+      "script": "measure_scope_power.py",
+      "argv": [],
+      "extra": {
+        "output": "/home/pi/RF-waveform-optimization/results/20260305_155626/raw/meas-tone-power-scope.jsonl"
+      }
+    }
+  ],
+  "run_id": "20260305_155626"
+}
