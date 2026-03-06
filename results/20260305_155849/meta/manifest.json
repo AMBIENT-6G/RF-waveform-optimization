@@ -7,6 +7,70 @@
       "extra": {
         "output": "/home/pi/RF-waveform-optimization/results/20260305_155849/raw/meas-tone-power-scope.jsonl"
       }
+    },
+    {
+      "timestamp_utc": "2026-03-06T07:44:44+00:00",
+      "script": "plot_scope_avg_power.py",
+      "argv": [
+        "results/20260305_155849/raw/meas-tone-power-scope.jsonl",
+        "--run-id",
+        "20260305_155849",
+        "--no-show"
+      ],
+      "extra": {
+        "input": "/mnt/c/Users/Calle/OneDrive - KU Leuven/Dramco/General/03_Research/01_Projects/06_Bilaterial/PWS-BIPT/RF-waveform-optimization/results/20260305_155849/raw/meas-tone-power-scope.jsonl",
+        "output": "/mnt/c/Users/Calle/OneDrive - KU Leuven/Dramco/General/03_Research/01_Projects/06_Bilaterial/PWS-BIPT/RF-waveform-optimization/results/20260305_155849/plots/meas-tone-power-scope_avg-power-vs-gain.png",
+        "reading_key": "scope_power_w"
+      }
+    },
+    {
+      "timestamp_utc": "2026-03-06T07:48:18+00:00",
+      "script": "plot_scope_avg_power.py",
+      "argv": [
+        "--no-show"
+      ],
+      "extra": {
+        "input": "/mnt/c/Users/Calle/OneDrive - KU Leuven/Dramco/General/03_Research/01_Projects/06_Bilaterial/PWS-BIPT/RF-waveform-optimization/results/20260305_155849/raw/meas-tone-power-scope.jsonl",
+        "output": "/mnt/c/Users/Calle/OneDrive - KU Leuven/Dramco/General/03_Research/01_Projects/06_Bilaterial/PWS-BIPT/RF-waveform-optimization/results/20260305_155849/plots/meas-tone-power-scope_avg-power-vs-gain.png",
+        "reading_key": "scope_power_w"
+      }
+    },
+    {
+      "timestamp_utc": "2026-03-06T07:49:04+00:00",
+      "script": "plot_scope_avg_power.py",
+      "argv": [],
+      "extra": {
+        "input": "C:\\Users\\Calle\\OneDrive - KU Leuven\\Dramco\\General\\03_Research\\01_Projects\\06_Bilaterial\\PWS-BIPT\\RF-waveform-optimization\\results\\20260305_155849\\raw\\meas-tone-power-scope.jsonl",
+        "output": "C:\\Users\\Calle\\OneDrive - KU Leuven\\Dramco\\General\\03_Research\\01_Projects\\06_Bilaterial\\PWS-BIPT\\RF-waveform-optimization\\results\\20260305_155849\\plots\\meas-tone-power-scope_avg-power-vs-gain.png",
+        "reading_key": "scope_power_w"
+      }
+    },
+    {
+      "timestamp_utc": "2026-03-06T07:55:54+00:00",
+      "script": "plot_scope_avg_power.py",
+      "argv": [
+        "results/20260305_155849/raw/meas-tone-power-scope.jsonl",
+        "--run-id",
+        "20260305_155849",
+        "--no-show"
+      ],
+      "extra": {
+        "input": "/mnt/c/Users/Calle/OneDrive - KU Leuven/Dramco/General/03_Research/01_Projects/06_Bilaterial/PWS-BIPT/RF-waveform-optimization/results/20260305_155849/raw/meas-tone-power-scope.jsonl",
+        "output": "/mnt/c/Users/Calle/OneDrive - KU Leuven/Dramco/General/03_Research/01_Projects/06_Bilaterial/PWS-BIPT/RF-waveform-optimization/results/20260305_155849/plots/meas-tone-power-scope_avg-power-vs-gain.png",
+        "csv_output": "/mnt/c/Users/Calle/OneDrive - KU Leuven/Dramco/General/03_Research/01_Projects/06_Bilaterial/PWS-BIPT/RF-waveform-optimization/results/20260305_155849/tables/meas-tone-power-scope_tone_gain_prf.csv",
+        "reading_key": "scope_power_w"
+      }
+    },
+    {
+      "timestamp_utc": "2026-03-06T08:08:01+00:00",
+      "script": "plot_scope_avg_power.py",
+      "argv": [],
+      "extra": {
+        "input": "C:\\Users\\Calle\\OneDrive - KU Leuven\\Dramco\\General\\03_Research\\01_Projects\\06_Bilaterial\\PWS-BIPT\\RF-waveform-optimization\\results\\20260305_155849\\raw\\meas-tone-power-scope.jsonl",
+        "output": "C:\\Users\\Calle\\OneDrive - KU Leuven\\Dramco\\General\\03_Research\\01_Projects\\06_Bilaterial\\PWS-BIPT\\RF-waveform-optimization\\results\\20260305_155849\\plots\\meas-tone-power-scope_avg-power-vs-gain.png",
+        "csv_output": "C:\\Users\\Calle\\OneDrive - KU Leuven\\Dramco\\General\\03_Research\\01_Projects\\06_Bilaterial\\PWS-BIPT\\RF-waveform-optimization\\results\\20260305_155849\\tables\\meas-tone-power-scope_tone_gain_prf.csv",
+        "reading_key": "scope_power_w"
+      }
     }
   ],
   "run_id": "20260305_155849"

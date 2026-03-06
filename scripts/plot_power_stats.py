@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime
@@ -21,6 +23,7 @@ MEASUREMENT_STEM_SUFFIX = "meas-tones-power"
 MEASUREMENT_TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REFERENCE_CSV = REPO_ROOT / "data" / "reference" / "harvester-chart-data.csv"
+RF_CALIBRATION_REGEX = re.compile(r".*tone_gain_prf\.csv$", re.IGNORECASE)
 
 
 def pw_to_dbm(power_pw: np.ndarray | float) -> np.ndarray:
@@ -44,57 +47,174 @@ def dbm_to_watts(power_dbm: np.ndarray | float) -> np.ndarray:
     return 1e-3 * np.power(10.0, values / 10.0)
 
 
-def fit_power_plus_offset(
-    input_values: np.ndarray,
-    output_values: np.ndarray,
-    alpha_min: float = -3.0,
-    alpha_max: float = 5.0,
-    grid_points: int = 2001,
-    passes: int = 4,
-) -> tuple[float, float] | None:
-    """Fit y = x**alpha + beta by minimizing squared error on alpha, beta."""
-    x = np.asarray(input_values, dtype=float)
-    y = np.asarray(output_values, dtype=float)
-    valid = np.isfinite(x) & np.isfinite(y) & (x > 0.0)
-    x = x[valid]
-    y = y[valid]
-
-    if x.size < 2 or np.unique(x).size < 2:
-        return None
-
-    low = float(alpha_min)
-    high = float(alpha_max)
-    best_alpha = np.nan
-    best_beta = np.nan
-
-    for _ in range(max(1, int(passes))):
-        alphas = np.linspace(low, high, num=max(3, int(grid_points)))
-        x_power = np.power(x[:, None], alphas[None, :])
-        betas = np.mean(y[:, None] - x_power, axis=0)
-        residual = y[:, None] - (x_power + betas[None, :])
-        sse = np.sum(residual * residual, axis=0)
-        best_index = int(np.argmin(sse))
-        best_alpha = float(alphas[best_index])
-        best_beta = float(betas[best_index])
-
-        if best_index == 0:
-            neighbor = min(1, alphas.size - 1)
-            low, high = float(alphas[0]), float(alphas[neighbor])
-        elif best_index == alphas.size - 1:
-            neighbor = max(0, alphas.size - 2)
-            low, high = float(alphas[neighbor]), float(alphas[-1])
-        else:
-            low, high = float(alphas[best_index - 1]), float(alphas[best_index + 1])
-
-    if not (np.isfinite(best_alpha) and np.isfinite(best_beta)):
-        return None
-
-    return best_alpha, best_beta
-
-
-def gain_to_input_power_dbm(gain_db: np.ndarray | float) -> np.ndarray:
+def gain_to_input_power_dbm(
+    gain_db: np.ndarray | float,
+    calibration_by_gain: dict[float, float] | None = None,
+    *,
+    debug: bool = False,
+    debug_label: str = "",
+) -> np.ndarray:
     values = np.asarray(gain_db, dtype=float)
-    return values - 80.0
+
+    if calibration_by_gain is None:
+        if debug:
+            print(
+                f"DEBUG gain_to_input_power_dbm[{debug_label}]: "
+                "no calibration_by_gain provided; using inferred Pin = gain - 80 dBm."
+            )
+        return values - 80.0
+
+    calibrated = np.full(values.shape, np.nan, dtype=float)
+    flat_gain = values.reshape(-1)
+    flat_calibrated = calibrated.reshape(-1)
+
+    if debug:
+        print(
+            f"DEBUG gain_to_input_power_dbm[{debug_label}] calibration_by_gain="
+            f"{dict(sorted(calibration_by_gain.items()))}"
+        )
+
+    for index, gain in enumerate(flat_gain):
+        mapped = calibration_by_gain.get(gain_key(float(gain)))
+        if mapped is None:
+            continue
+        flat_calibrated[index] = float(mapped)
+
+    if debug:
+        debug_pairs = [
+            (float(gain), float(power))
+            for gain, power in zip(flat_gain.tolist(), flat_calibrated.tolist())
+            if np.isfinite(power)
+        ]
+        print(f"DEBUG gain_to_input_power_dbm[{debug_label}] mapped_points={debug_pairs}")
+
+    return calibrated
+
+
+def gain_key(gain_db: float) -> float:
+    return round(float(gain_db), 6)
+
+
+def choose_csv_column(fieldnames: list[str], candidates: tuple[str, ...]) -> str | None:
+    by_lower = {name.strip().lower(): name for name in fieldnames if isinstance(name, str)}
+    for candidate in candidates:
+        match = by_lower.get(candidate.lower())
+        if match is not None:
+            return match
+    return None
+
+
+def load_rf_calibration_csv(path: Path) -> dict[int, dict[float, float]]:
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        if not fieldnames:
+            raise ValueError(f"RF calibration CSV has no header row: {path}")
+
+        tone_col = choose_csv_column(fieldnames, ("tone",))
+        gain_col = choose_csv_column(fieldnames, ("tx_gain_db", "gain_db", "configured_gain_db"))
+        power_col = choose_csv_column(fieldnames, ("p_rf_dbm", "prf_dbm", "input_power_dbm", "pin_dbm"))
+
+        missing = []
+        if tone_col is None:
+            missing.append("tone")
+        if gain_col is None:
+            missing.append("tx_gain_db/gain_db")
+        if power_col is None:
+            missing.append("p_rf_dbm")
+        if missing:
+            raise ValueError(
+                f"RF calibration CSV missing required column(s): {', '.join(missing)} in {path}"
+            )
+
+        calibration: dict[int, dict[float, float]] = defaultdict(dict)
+        for line_number, row in enumerate(reader, start=2):
+            try:
+                tone = int(float(row[tone_col]))  # type: ignore[index]
+                gain = float(row[gain_col])  # type: ignore[index]
+                power_dbm = float(row[power_col])  # type: ignore[index]
+            except (TypeError, ValueError, KeyError) as exc:
+                raise ValueError(
+                    f"Invalid RF calibration row {line_number} in {path}"
+                ) from exc
+
+            if not np.isfinite(power_dbm):
+                continue
+            calibration[tone][gain_key(gain)] = power_dbm
+
+    if not calibration:
+        raise ValueError(f"No usable calibration points found in {path}")
+    return {tone: dict(gain_map) for tone, gain_map in calibration.items()}
+
+
+def discover_rf_calibration_files(search_dir: Path = Path("results")) -> list[Path]:
+    search_root = search_dir.resolve()
+    if not search_root.exists():
+        return []
+
+    candidates = [
+        path.resolve()
+        for path in search_root.rglob("*.csv")
+        if RF_CALIBRATION_REGEX.match(path.name)
+    ]
+    if not candidates and search_root != REPO_ROOT:
+        candidates = [
+            path.resolve()
+            for path in REPO_ROOT.rglob("*.csv")
+            if RF_CALIBRATION_REGEX.match(path.name)
+        ]
+    return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def build_input_power_lookup(
+    series: dict[int, dict[str, np.ndarray]],
+    rf_calibration: dict[int, dict[float, float]] | None,
+    debug_calibration: bool = False,
+) -> tuple[dict[int, np.ndarray], bool]:
+    input_power_dbm_by_tone: dict[int, np.ndarray] = {}
+    used_calibration = False
+
+    for tone in sorted(series):
+        gains = np.asarray(series[tone]["gains"], dtype=float)
+        inferred = gain_to_input_power_dbm(gains)
+
+        if rf_calibration is None:
+            input_power_dbm_by_tone[tone] = inferred
+            continue
+
+        tone_map = rf_calibration.get(int(tone))
+        if not tone_map:
+            print(
+                f"Warning: tone {tone} missing in RF calibration CSV; using inferred Pin = gain - 80 dBm."
+            )
+            input_power_dbm_by_tone[tone] = inferred
+            continue
+
+        calibrated = gain_to_input_power_dbm(
+            gains,
+            calibration_by_gain=tone_map,
+            debug=debug_calibration,
+            debug_label=f"tone={tone}",
+        )
+        matched = int(np.count_nonzero(np.isfinite(calibrated)))
+
+        if matched == 0:
+            print(
+                f"Warning: tone {tone} has no gain matches in RF calibration CSV; using inferred Pin = gain - 80 dBm."
+            )
+            input_power_dbm_by_tone[tone] = inferred
+            continue
+
+        if matched < gains.size:
+            print(
+                f"Warning: tone {tone} missing {gains.size - matched} calibrated gain point(s); "
+                "dropping those points from input-power plots."
+            )
+
+        input_power_dbm_by_tone[tone] = calibrated
+        used_calibration = True
+
+    return input_power_dbm_by_tone, used_calibration
 
 
 def parse_percentiles(value: str) -> tuple[float, float]:
@@ -461,6 +581,8 @@ def plot_efficiency_markers(
     percentiles: tuple[float, float],
     power_key: str,
     output: Path | None,
+    input_power_dbm_by_tone: dict[int, np.ndarray] | None = None,
+    use_calibrated_input: bool = False,
 ):
     if not series:
         raise ValueError("No usable records found in the input file")
@@ -475,7 +597,10 @@ def plot_efficiency_markers(
 
     for index, tone in enumerate(sorted(series)):
         tone_series = series[tone]
-        input_power_dbm = gain_to_input_power_dbm(tone_series["gains"])
+        if input_power_dbm_by_tone is not None and tone in input_power_dbm_by_tone:
+            input_power_dbm = np.asarray(input_power_dbm_by_tone[tone], dtype=float)
+        else:
+            input_power_dbm = gain_to_input_power_dbm(tone_series["gains"])
         input_power_w = dbm_to_watts(input_power_dbm)
         output_power_w = pw_to_watts(tone_series["mean"])
         percentile_a_power_w = pw_to_watts(tone_series[f"p{percentiles[0]:g}"])
@@ -498,6 +623,19 @@ def plot_efficiency_markers(
             out=np.full_like(percentile_b_power_w, np.nan, dtype=float),
             where=input_power_w > 0,
         ) * 100.0
+        valid = (
+            np.isfinite(input_power_dbm)
+            & np.isfinite(efficiency_pct)
+            & np.isfinite(percentile_a_efficiency_pct)
+            & np.isfinite(percentile_b_efficiency_pct)
+        )
+        if not np.any(valid):
+            print(f"Warning: skipping tone {tone} in efficiency plot (no valid input-power points).")
+            continue
+        input_power_dbm = input_power_dbm[valid]
+        efficiency_pct = efficiency_pct[valid]
+        percentile_a_efficiency_pct = percentile_a_efficiency_pct[valid]
+        percentile_b_efficiency_pct = percentile_b_efficiency_pct[valid]
         order = np.argsort(input_power_dbm)
         input_power_dbm = input_power_dbm[order]
         efficiency_pct = efficiency_pct[order]
@@ -542,7 +680,8 @@ def plot_efficiency_markers(
             zorder=5,
         )
 
-    fig.suptitle("Efficiency vs inferred input power")
+    title_prefix = "calibrated" if use_calibrated_input else "inferred"
+    fig.suptitle(f"Efficiency vs {title_prefix} input power")
     axis.set_xlabel("Input RF power Pin (dBm)")
     axis.set_ylabel("Efficiency Pout/Pin (%)")
     axis.grid(True, alpha=0.3)
@@ -556,6 +695,8 @@ def plot_input_output_mw_markers(
     series: dict[int, dict[str, np.ndarray]],
     power_key: str,
     output: Path | None,
+    input_power_dbm_by_tone: dict[int, np.ndarray] | None = None,
+    use_calibrated_input: bool = False,
 ):
     if not series:
         raise ValueError("No usable records found in the input file")
@@ -568,9 +709,18 @@ def plot_input_output_mw_markers(
 
     for index, tone in enumerate(sorted(series)):
         tone_series = series[tone]
-        input_power_dbm = gain_to_input_power_dbm(tone_series["gains"])
+        if input_power_dbm_by_tone is not None and tone in input_power_dbm_by_tone:
+            input_power_dbm = np.asarray(input_power_dbm_by_tone[tone], dtype=float)
+        else:
+            input_power_dbm = gain_to_input_power_dbm(tone_series["gains"])
         input_power_mw = watts_to_mw(dbm_to_watts(input_power_dbm))
         output_power_mw = watts_to_mw(pw_to_watts(tone_series["mean"]))
+        valid = np.isfinite(input_power_mw) & np.isfinite(output_power_mw) & (input_power_mw > 0)
+        if not np.any(valid):
+            print(f"Warning: skipping tone {tone} in input/output plot (no valid input-power points).")
+            continue
+        input_power_mw = input_power_mw[valid]
+        output_power_mw = output_power_mw[valid]
         order = np.argsort(input_power_mw)
         sorted_input_mw = input_power_mw[order]
         sorted_output_mw = output_power_mw[order]
@@ -584,25 +734,13 @@ def plot_input_output_mw_markers(
             linewidth=1.5,
             label=f"Tone {tone} data",
         )
-        fit_result = fit_power_plus_offset(sorted_input_mw, sorted_output_mw)
-        if fit_result is not None:
-            alpha, beta = fit_result
-            fit_grid_x = np.linspace(float(np.min(sorted_input_mw)), float(np.max(sorted_input_mw)), num=200)
-            fit_grid_y = np.power(fit_grid_x, alpha) + beta
-            axis.plot(
-                fit_grid_x,
-                fit_grid_y,
-                color=color,
-                linestyle="--",
-                linewidth=1.5,
-                label=f"Tone {tone} fit: y=x**{alpha:.3g}+{beta:.3g}",
-            )
 
-    fig.suptitle("Output vs input power (linear mW)")
+    title_prefix = "calibrated" if use_calibrated_input else "inferred"
+    fig.suptitle(f"Output vs {title_prefix} input power (linear mW)")
     axis.set_xlabel("Input RF power Pin (mW)")
     axis.set_ylabel("Output DC power Pout (mW)")
     axis.grid(True, alpha=0.3)
-    axis.legend(title="Data + fit")
+    axis.legend(title="Data")
     fig.tight_layout()
     save_figure(fig, output)
     return plt, fig
@@ -651,6 +789,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Run identifier. If omitted, inferred from input path, else manual_<timestamp>.",
     )
     parser.add_argument(
+        "--rf-calibration-csv",
+        type=Path,
+        default=None,
+        help=(
+            "Optional CSV with columns tone, tx_gain_db, p_rf_dbm. "
+            "Used to calibrate input-power x-axes instead of Pin = gain - 80 dBm. "
+            "If omitted, the newest '*tone_gain_prf.csv' is auto-discovered by regex."
+        ),
+    )
+    parser.add_argument(
+        "--debug-calibration",
+        action="store_true",
+        help="Print DEBUG output for calibration_by_gain mapping and matched points per tone.",
+    )
+    parser.add_argument(
         "--no-show",
         action="store_true",
         help="Save the figure without opening an interactive window",
@@ -669,6 +822,29 @@ def main() -> int:
     all_figures = []
     plt_module = None
     results_dir = args.results_dir.resolve()
+    rf_calibration = None
+    rf_calibration_path: Path | None = None
+    if args.rf_calibration_csv is not None:
+        rf_calibration_path = args.rf_calibration_csv.resolve()
+        if not rf_calibration_path.exists():
+            raise FileNotFoundError(f"RF calibration CSV not found: {args.rf_calibration_csv}")
+    else:
+        discovered = discover_rf_calibration_files(results_dir)
+        if discovered:
+            rf_calibration_path = discovered[0]
+            print(
+                f"Auto-discovered RF calibration CSV via regex "
+                f"'{RF_CALIBRATION_REGEX.pattern}': {rf_calibration_path}"
+            )
+
+    if rf_calibration_path is not None:
+        rf_calibration = load_rf_calibration_csv(rf_calibration_path)
+        print(f"Loaded RF calibration CSV: {rf_calibration_path}")
+    else:
+        print(
+            "No RF calibration CSV provided or discovered; "
+            "using inferred Pin = gain - 80 dBm."
+        )
 
     for input_path in input_paths:
         run_id = args.run_id or infer_run_id_from_path(input_path) or manual_run_id()
@@ -683,6 +859,11 @@ def main() -> int:
         records = load_records(input_path)
         grouped = group_power_by_tone_gain(records, power_key=args.power_key)
         series = build_series(grouped, percentiles=args.percentiles)
+        input_power_dbm_by_tone, used_calibration = build_input_power_lookup(
+            series,
+            rf_calibration=rf_calibration,
+            debug_calibration=args.debug_calibration,
+        )
         plt_module, band_fig = plot_series(
             series,
             percentiles=args.percentiles,
@@ -699,11 +880,15 @@ def main() -> int:
             percentiles=args.percentiles,
             power_key=args.power_key,
             output=efficiency_output_path(output_path),
+            input_power_dbm_by_tone=input_power_dbm_by_tone,
+            use_calibrated_input=used_calibration,
         )
         _, input_output_fig = plot_input_output_mw_markers(
             series,
             power_key=args.power_key,
             output=input_output_mw_output_path(output_path),
+            input_power_dbm_by_tone=input_power_dbm_by_tone,
+            use_calibrated_input=used_calibration,
         )
         all_figures.append(band_fig)
         all_figures.append(marker_fig)
@@ -720,6 +905,9 @@ def main() -> int:
             extra={
                 "input": str(input_path),
                 "output": str(output_path),
+                "rf_calibration_csv": (
+                    str(rf_calibration_path) if rf_calibration_path is not None else None
+                ),
             },
         )
         print(f"Updated run manifest: {manifest_path}")
