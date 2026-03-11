@@ -261,6 +261,11 @@ def rational_saturation_model(prf_mw: np.ndarray | float, a: float, b: float, c:
     return (a * prf_power) / (1.0 + c * prf_power)
 
 
+def power_law_offset_model(prf_mw: np.ndarray | float, alpha: float, beta: float, gamma: float) -> np.ndarray:
+    prf = np.asarray(prf_mw, dtype=float)
+    return alpha * np.power(np.maximum(prf, EPS), beta) + gamma
+
+
 def exponential_model(prf_mw: np.ndarray | float, amp: float, slope: float) -> np.ndarray:
     prf = np.asarray(prf_mw, dtype=float)
     exponent = np.clip(slope * prf, -700.0, 700.0)
@@ -379,6 +384,53 @@ def _rational_bounds(prf_mw: np.ndarray, pdc_mw: np.ndarray) -> tuple[tuple[floa
     return ((0.0, 0.0, 0.0), (np.inf, 10.0, np.inf))
 
 
+def _power_law_offset_guess(prf_mw: np.ndarray, pdc_mw: np.ndarray) -> tuple[float, ...]:
+    x, y, _, _, _ = _x_stats(prf_mw, pdc_mw)
+    y_min = float(np.min(y)) if y.size else 0.0
+    y_max = float(np.max(y)) if y.size else 1.0
+    y_scale = max(y_max - y_min, abs(y_max), 1.0, EPS)
+    gamma_candidates = np.unique(
+        np.concatenate(
+            (
+                np.linspace(y_min - y_scale, y_min - 0.01 * y_scale, num=12),
+                np.array([0.0, y_min - 0.1 * y_scale, y_min - 0.5 * y_scale]),
+            )
+        )
+    )
+
+    design = np.column_stack([np.ones_like(x), np.log(np.maximum(x, EPS))])
+    best_guess: tuple[float, float, float] | None = None
+    best_score = float("inf")
+    for gamma0 in gamma_candidates:
+        if gamma0 >= y_min:
+            continue
+        shifted = y - gamma0
+        if not np.all(shifted > 0.0):
+            continue
+        coeffs, *_ = np.linalg.lstsq(design, np.log(shifted), rcond=None)
+        alpha0 = float(np.exp(coeffs[0]))
+        beta0 = float(np.clip(coeffs[1], 0.0, 10.0))
+        if not np.isfinite(alpha0) or alpha0 <= 0.0 or not np.isfinite(beta0):
+            continue
+        pred = alpha0 * np.power(np.maximum(x, EPS), beta0) + gamma0
+        score = float(np.sqrt(np.mean((y - pred) ** 2)))
+        if np.isfinite(score) and score < best_score:
+            best_score = score
+            best_guess = (alpha0, beta0, float(gamma0))
+
+    if best_guess is not None:
+        return best_guess
+
+    gamma0 = y_min - 0.1 * y_scale
+    alpha0 = max((y_max - gamma0) / max(float(np.max(x)), EPS), EPS)
+    return (alpha0, 1.0, gamma0)
+
+
+def _power_law_offset_bounds(prf_mw: np.ndarray, pdc_mw: np.ndarray) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    _ = (prf_mw, pdc_mw)
+    return ((0.0, 0.0, -np.inf), (np.inf, 10.0, np.inf))
+
+
 def _exponential_guess(prf_mw: np.ndarray, pdc_mw: np.ndarray) -> tuple[float, ...]:
     _, y, _, x_max, x_span = _x_stats(prf_mw, pdc_mw)
     y_max = float(np.max(y)) if y.size else 1.0
@@ -440,6 +492,13 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         ("a", "b", "c"),
         _rational_guess,
         _rational_bounds,
+    ),
+    "power_law_offset": ModelSpec(
+        "power_law_offset",
+        power_law_offset_model,
+        ("alpha", "beta", "gamma"),
+        _power_law_offset_guess,
+        _power_law_offset_bounds,
     ),
     "exponential": ModelSpec("exponential", exponential_model, ("A", "B"), _exponential_guess, _exponential_bounds),
     "piecewise_linear": ModelSpec(
@@ -584,6 +643,16 @@ def per_tone_plot_path(base_output: Path, tone: int) -> Path:
     return base_output.with_name(f"{base_output.stem}_tone{tone}{base_output.suffix}")
 
 
+def format_param_summary(param_names: tuple[str, ...], params: np.ndarray) -> str:
+    parts = []
+    for name, value in zip(param_names, params, strict=False):
+        if np.isfinite(value):
+            parts.append(f"{name}={value:.3g}")
+        else:
+            parts.append(f"{name}=nan")
+    return "[" + ", ".join(parts) + "]"
+
+
 def plot_fits(
     tone_data: dict[int, dict[str, np.ndarray]],
     by_tone_results: dict[int, list[FitResult]],
@@ -616,7 +685,7 @@ def plot_fits(
                 grid[valid],
                 y_grid[valid],
                 linewidth=1.6,
-                label=f"{result.model_name} ({result.rmse:.3g})",
+                label=f"{result.model_name} ({result.rmse:.3g}) {format_param_summary(result.param_names, result.params)}",
             )
 
         axis.set_xlabel("Prf (mW)")
