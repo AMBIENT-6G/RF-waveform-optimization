@@ -24,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 IQ_DIR = REPO_ROOT / "data" / "tx_iq"
 # Preferred naming is iq_N<N>_BW<BW>.npz; keep legacy kHz/suffix support for compatibility.
 IQ_BW_REGEX = re.compile(r"^iq_N(?P<n>\d+)_BW(?P<bw>\d+)(?:kHz)?(?:_.*)?\.npz$")
+PRF_MW_REGEX = re.compile(r"_Prf(?P<prf>[-+]?(?:\d+\.?\d*|\.\d+))(?:mW)?(?:_|$)")
 # Use UHD defaults by default; aggressive frame settings can trigger USB NO_MEM on some hosts.
 DEFAULT_UHD_ARGS = ""
 DEFAULT_SEND_TIMEOUT_S = 10.0
@@ -88,6 +89,26 @@ def _parse_tone_bw_from_iq_name(path: Path) -> tuple[int, int] | None:
     return int(match.group("n")), int(match.group("bw"))
 
 
+def _parse_prf_mw_from_iq_name(path: Path) -> float | None:
+    match = PRF_MW_REGEX.search(path.stem)
+    if not match:
+        return None
+    try:
+        return float(match.group("prf"))
+    except ValueError:
+        return None
+
+
+def _read_npz_column_index(path: Path) -> int | None:
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            if "column" not in data.files:
+                return None
+            return int(np.asarray(data["column"]).squeeze())
+    except Exception:
+        return None
+
+
 def find_iq_file_for_tone_bw(iq_dir: Path, tone: int, bw_khz: int) -> Path:
     if not iq_dir.exists():
         raise FileNotFoundError(f"IQ directory not found: {iq_dir.resolve()}")
@@ -123,9 +144,26 @@ def find_iq_file_for_tone_bw(iq_dir: Path, tone: int, bw_khz: int) -> Path:
     if len(preferred) == 1:
         return preferred[0].resolve()
 
+    # New exports may encode power in the filename (e.g. _Prf0.001mW) while
+    # preserving the selected input-power column in NPZ metadata.
+    preferred = [path for path in matches if _read_npz_column_index(path) == 0]
+    if len(preferred) == 1:
+        return preferred[0].resolve()
+
+    # As a final fallback for multiple _Prf files, pick the lowest power.
+    prf_candidates = []
+    for path in matches:
+        prf_mw = _parse_prf_mw_from_iq_name(path)
+        if prf_mw is None:
+            continue
+        prf_candidates.append((prf_mw, path))
+    if prf_candidates:
+        prf_candidates.sort(key=lambda item: item[0])
+        return prf_candidates[0][1].resolve()
+
     raise RuntimeError(
         f"Multiple IQ files found for tone={tone}, bw={bw_khz}kHz: {[p.name for p in matches]}. "
-        "Keep one file per tone/bw (or one _col0 file) in data/tx_iq/."
+        "Keep one file per tone/bw (or include NPZ metadata column=0, or a _Prf<mW> tag) in data/tx_iq/."
     )
 
 

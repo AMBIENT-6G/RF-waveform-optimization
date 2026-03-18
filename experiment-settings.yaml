@@ -4,4 +4,4 @@ scope:
   center_hz: 875e6
   span_hz: 4e6
   channel_power:
-    channel_width: 2e6
+    channel_width: 2e6 

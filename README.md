@@ -117,6 +117,7 @@ python3 scripts/fit_tone_models.py \
 - `logistic_sigmoind_model`
 - `paper_logistic`
 - `rational_saturation`
+- `power_law_offset`
 - `exponential`
 - `piecewise_linear`
 
