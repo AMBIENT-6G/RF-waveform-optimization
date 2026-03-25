@@ -499,7 +499,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--port",
-        default="ttyUSB0",
+        default="/dev/ttyUSB0",
         help="Energy-profiler serial port (default: ttyUSB0)",
     )
     parser.add_argument("--baudrate", type=int, default=115200, help="Serial baud rate (default: 115200)")
