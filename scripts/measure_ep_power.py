@@ -2,8 +2,8 @@
 """Sweep tone/gain settings and log energy-profiler measurements.
 
 Default behavior:
-- tones: 0, 4, 8, 16, 32
-- gains: 50 dB to 85 dB in 0.2 dB steps
+- tones: 0, 1, 4, 8, 16, 32 (0 = DC, 1 = NB)
+- gains: auto-discovered from gain-tagged IQ files when available
 - launches ``tx_waveform.py`` for each tone/gain combination
 - waits 10 s before sampling the energy profiler
 - records profiler readings for 10 s
@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import re
 import shutil
 import struct
 import subprocess
@@ -34,6 +36,8 @@ START_BYTE = 0x02
 READING_FORMAT = ">IIII"
 READING_PAYLOAD_SIZE = struct.calcsize(READING_FORMAT)
 REPO_ROOT = Path(__file__).resolve().parents[1]
+IQ_DIR = REPO_ROOT / "data" / "tx_iq"
+TX_GAIN_REGEX = re.compile(r"_TXG(?P<gain>[-+]?(?:\d+\.?\d*|\.\d+))db(?:_|$)", re.IGNORECASE)
 
 
 def xor_checksum(data: bytes) -> int:
@@ -80,7 +84,7 @@ def parse_tone_list(value: str) -> list[int]:
     if not tones:
         raise argparse.ArgumentTypeError("At least one tone must be provided")
 
-    return tones
+    return list(dict.fromkeys(tones))
 
 
 def build_gain_values(start: float, stop: float, step: float) -> list[float]:
@@ -114,6 +118,139 @@ def append_jsonl(path: Path, record: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         json.dump(record, handle)
         handle.write("\n")
+
+
+def tone_label(tone: int) -> str:
+    if tone == 0:
+        return "DC"
+    if tone == 1:
+        return "NB"
+    return f"N={tone}"
+
+
+def waveform_kind(tone: int) -> str:
+    if tone == 0:
+        return "dc"
+    if tone == 1:
+        return "nb"
+    return "multitone"
+
+
+def waveform_glob(iq_dir: Path, tone: int, bandwidth_khz: int):
+    if tone == 0:
+        pattern = f"iq_dc_BW{bandwidth_khz}*.npz"
+    elif tone == 1:
+        pattern = f"iq_nb_BW{bandwidth_khz}*.npz"
+    else:
+        pattern = f"iq_N{tone}_BW{bandwidth_khz}*.npz"
+    return sorted(iq_dir.glob(pattern))
+
+
+def parse_tx_gain_from_iq_name(path: Path) -> float | None:
+    match = TX_GAIN_REGEX.search(path.stem)
+    if not match:
+        return None
+    try:
+        return float(match.group("gain"))
+    except ValueError:
+        return None
+
+
+def discover_available_gains(iq_dir: Path, bandwidth_khz: int, tones: list[int]) -> tuple[list[float], str]:
+    multitone_tones = [tone for tone in tones if tone >= 2]
+    if not multitone_tones:
+        multitone_tones = sorted(
+            {
+                int(match.group("tone"))
+                for path in iq_dir.glob(f"iq_N*_BW{bandwidth_khz}*.npz")
+                for match in [re.search(r"iq_N(?P<tone>\d+)_BW", path.name)]
+                if match is not None
+            }
+        )
+
+    gain_sets: list[set[float]] = []
+    contributing_tones: list[int] = []
+    for tone in multitone_tones:
+        gains = {
+            gain
+            for path in waveform_glob(iq_dir, tone, bandwidth_khz)
+            for gain in [parse_tx_gain_from_iq_name(path)]
+            if gain is not None and math.isfinite(gain)
+        }
+        if gains:
+            gain_sets.append(gains)
+            contributing_tones.append(tone)
+
+    if gain_sets:
+        shared = set.intersection(*gain_sets)
+        if not shared:
+            detail = {tone_label(tone): sorted(gains) for tone, gains in zip(contributing_tones, gain_sets, strict=False)}
+            raise RuntimeError(
+                f"No shared TX gain set found across BW={bandwidth_khz}kHz multitone IQ files: {detail}"
+            )
+        return sorted(shared), f"auto-discovered shared gains from {', '.join(tone_label(t) for t in contributing_tones)}"
+
+    return [], "no gain-tagged multitone IQ files found"
+
+
+def resolve_iq_file_for_request(iq_dir: Path, tone: int, bandwidth_khz: int, gain_db: float) -> Path:
+    matches = waveform_glob(iq_dir, tone, bandwidth_khz)
+    if not matches:
+        raise FileNotFoundError(
+            f"No IQ file found for {tone_label(tone)}, BW={bandwidth_khz}kHz in {iq_dir.resolve()}"
+        )
+
+    if tone in (0, 1):
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"Multiple IQ files found for {tone_label(tone)}, BW={bandwidth_khz}kHz: {[p.name for p in matches]}"
+            )
+        return matches[0].resolve()
+
+    exact = [
+        path
+        for path in matches
+        if (gain := parse_tx_gain_from_iq_name(path)) is not None
+        and math.isclose(gain, gain_db, rel_tol=0.0, abs_tol=1e-6)
+    ]
+    if len(exact) == 1:
+        return exact[0].resolve()
+    if len(exact) > 1:
+        raise RuntimeError(
+            f"Multiple IQ files found for {tone_label(tone)}, BW={bandwidth_khz}kHz, gain={gain_db:g} dB: "
+            f"{[p.name for p in exact]}"
+        )
+
+    if len(matches) == 1 and parse_tx_gain_from_iq_name(matches[0]) is None:
+        return matches[0].resolve()
+
+    available_gains = sorted(
+        gain
+        for path in matches
+        for gain in [parse_tx_gain_from_iq_name(path)]
+        if gain is not None
+    )
+    raise FileNotFoundError(
+        f"No IQ file found for {tone_label(tone)}, BW={bandwidth_khz}kHz, gain={gain_db:g} dB. "
+        f"Available tagged gains: {available_gains}"
+    )
+
+
+def build_sweep_plan(iq_dir: Path, bandwidth_khz: int, tones: list[int], gains: list[float]) -> list[dict[str, Any]]:
+    plan = []
+    for gain_db in gains:
+        for tone in tones:
+            iq_file = resolve_iq_file_for_request(iq_dir, tone, bandwidth_khz, gain_db)
+            plan.append(
+                {
+                    "tone": int(tone),
+                    "gain_db": float(gain_db),
+                    "waveform_kind": waveform_kind(tone),
+                    "waveform_label": tone_label(tone),
+                    "iq_file": str(iq_file),
+                }
+            )
+    return plan
 
 
 @dataclass
@@ -229,7 +366,17 @@ def wait_for_process(process: subprocess.Popen[bytes]) -> int:
 def run_sweep(args: argparse.Namespace) -> int:
     profiler = EnergyProfiler(args.port, args.baudrate, args.serial_timeout)
     tx_script = Path(__file__).with_name("tx_waveform.py").resolve()
-    gains = build_gain_values(args.gain_start, args.gain_stop, args.gain_step)
+    if not IQ_DIR.exists():
+        raise FileNotFoundError(f"IQ directory not found: {IQ_DIR.resolve()}")
+
+    auto_gains, gain_source = discover_available_gains(IQ_DIR, args.bw, args.tones)
+    if auto_gains:
+        gains = auto_gains
+    else:
+        gains = build_gain_values(args.gain_start, args.gain_stop, args.gain_step)
+        gain_source = "explicit gain range"
+
+    sweep_plan = build_sweep_plan(IQ_DIR, args.bw, args.tones, gains)
     completed_sweeps = 0
 
     try:
@@ -237,59 +384,72 @@ def run_sweep(args: argparse.Namespace) -> int:
             profiler.set_target_voltage(args.target_voltage)
             print(f"Set EP target voltage to {args.target_voltage} mV")
 
-        for tone in args.tones:
-            for gain in gains:
-                print(f"Starting sweep: tone={tone}, gain={gain:g} dB")
-                process = launch_tx_process(
-                    python_executable=args.python,
-                    tx_script=tx_script,
-                    tone=tone,
-                    bandwidth_khz=args.bw,
-                    gain_db=gain,
-                    duration_s=args.tx_duration,
+        print(f"Using {len(gains)} gain value(s): {gains}")
+        print(f"Gain source: {gain_source}")
+        print(
+            "Sweep order per gain: "
+            + ", ".join(tone_label(tone) for tone in args.tones)
+        )
+
+        for entry in sweep_plan:
+            tone = int(entry["tone"])
+            gain = float(entry["gain_db"])
+            print(
+                f"Starting sweep: {entry['waveform_label']}, gain={gain:g} dB, iq_file={Path(entry['iq_file']).name}"
+            )
+            process = launch_tx_process(
+                python_executable=args.python,
+                tx_script=tx_script,
+                tone=tone,
+                bandwidth_khz=args.bw,
+                gain_db=gain,
+                duration_s=args.tx_duration,
+            )
+
+            started_at = utc_now_iso()
+            sweep_started = time.monotonic()
+            try:
+                time.sleep(args.pre_measure_delay)
+                readings = collect_measurements(profiler, args.measure_window)
+                exit_code = wait_for_process(process)
+            except Exception:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                raise
+
+            if exit_code != 0:
+                raise RuntimeError(
+                    f"tx_waveform.py failed for {entry['waveform_label']}, gain={gain:g} dB with exit code {exit_code}"
                 )
 
-                started_at = utc_now_iso()
-                sweep_started = time.monotonic()
-                try:
-                    time.sleep(args.pre_measure_delay)
-                    readings = collect_measurements(profiler, args.measure_window)
-                    exit_code = wait_for_process(process)
-                except Exception:
-                    if process.poll() is None:
-                        process.terminate()
-                        try:
-                            process.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            process.kill()
-                            process.wait()
-                    raise
-
-                if exit_code != 0:
-                    raise RuntimeError(
-                        f"tx_waveform.py failed for tone={tone}, gain={gain:g} dB with exit code {exit_code}"
-                    )
-
-                sweep_duration_s = time.monotonic() - sweep_started
-                record = {
-                    "started_at": started_at,
-                    "completed_at": utc_now_iso(),
-                    "tone": tone,
-                    "bw_khz": args.bw,
-                    "gain_db": gain,
-                    "tx_duration_s": args.tx_duration,
-                    "pre_measure_delay_s": args.pre_measure_delay,
-                    "measure_window_s": args.measure_window,
-                    "sweep_duration_s": round(sweep_duration_s, 3),
-                    "reading_count": len(readings),
-                    "readings": readings,
-                }
-                append_jsonl(args.output, record)
-                completed_sweeps += 1
-                print(
-                    f"Stored {len(readings)} readings for tone={tone}, gain={gain:g} dB "
-                    f"to {args.output}"
-                )
+            sweep_duration_s = time.monotonic() - sweep_started
+            record = {
+                "started_at": started_at,
+                "completed_at": utc_now_iso(),
+                "tone": tone,
+                "waveform_kind": entry["waveform_kind"],
+                "waveform_label": entry["waveform_label"],
+                "iq_file": entry["iq_file"],
+                "bw_khz": args.bw,
+                "gain_db": gain,
+                "tx_duration_s": args.tx_duration,
+                "pre_measure_delay_s": args.pre_measure_delay,
+                "measure_window_s": args.measure_window,
+                "sweep_duration_s": round(sweep_duration_s, 3),
+                "reading_count": len(readings),
+                "readings": readings,
+            }
+            append_jsonl(args.output, record)
+            completed_sweeps += 1
+            print(
+                f"Stored {len(readings)} readings for {entry['waveform_label']}, gain={gain:g} dB "
+                f"to {args.output}"
+            )
     finally:
         profiler.close()
 
@@ -302,13 +462,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tones",
         type=parse_tone_list,
-        default=[0, 4, 8, 16, 32],
-        help="Comma-separated tone list (default: 0,4,8,16,32)",
+        default=[0, 1, 4, 8, 16, 32],
+        help="Comma-separated waveform list (0=DC, 1=NB, N>=2 multitone; default: 0,1,4,8,16,32)",
     )
     parser.add_argument("--bw", type=int, default=1000, help="Waveform bandwidth in kHz (default: 1000)")
-    parser.add_argument("--gain-start", type=float, default=50.0, help="Start gain in dB (default: 50)")
-    parser.add_argument("--gain-stop", type=float, default=85.0, help="Stop gain in dB, inclusive (default: 85)")
-    parser.add_argument("--gain-step", type=float, default=0.2, help="Gain step in dB (default: 0.2)")
+    parser.add_argument(
+        "--gain-start",
+        type=float,
+        default=50.0,
+        help="Fallback start gain in dB if gain-tagged IQ files are absent (default: 50)",
+    )
+    parser.add_argument(
+        "--gain-stop",
+        type=float,
+        default=85.0,
+        help="Fallback stop gain in dB, inclusive, if gain-tagged IQ files are absent (default: 85)",
+    )
+    parser.add_argument(
+        "--gain-step",
+        type=float,
+        default=0.2,
+        help="Fallback gain step in dB if gain-tagged IQ files are absent (default: 0.2)",
+    )
     parser.add_argument("--tx-duration", type=float, default=20.0, help="TX duration in seconds (default: 20)")
     parser.add_argument(
         "--pre-measure-delay",

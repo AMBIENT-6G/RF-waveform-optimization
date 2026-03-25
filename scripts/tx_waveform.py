@@ -2,7 +2,7 @@
 """Replay an exported IQ waveform NPZ on a USRP using UHD.
 
 Required arguments are intentionally minimal:
-- --tone: number of tones (N in filename)
+- --tone: waveform selector (0 = DC, 1 = NB, N>=2 = multitone carrier count)
 - --bw: bandwidth in kHz (BW in filename)
 - --gain: TX gain in dB
 - --duration: approximate replay time in seconds
@@ -22,8 +22,10 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IQ_DIR = REPO_ROOT / "data" / "tx_iq"
-# Preferred naming is iq_N<N>_BW<BW>.npz; keep legacy kHz/suffix support for compatibility.
-IQ_BW_REGEX = re.compile(r"^iq_N(?P<n>\d+)_BW(?P<bw>\d+)(?:kHz)?(?:_.*)?\.npz$")
+IQ_MULTITONE_REGEX = re.compile(r"^iq_N(?P<n>\d+)_BW(?P<bw>\d+)(?:kHz)?(?:_.*)?\.npz$", re.IGNORECASE)
+IQ_DC_REGEX = re.compile(r"^iq_dc_BW(?P<bw>\d+)(?:kHz)?(?:_.*)?\.npz$", re.IGNORECASE)
+IQ_NB_REGEX = re.compile(r"^iq_nb_BW(?P<bw>\d+)(?:kHz)?(?:_.*)?\.npz$", re.IGNORECASE)
+TX_GAIN_REGEX = re.compile(r"_TXG(?P<gain>[-+]?(?:\d+\.?\d*|\.\d+))db(?:_|$)", re.IGNORECASE)
 PRF_MW_REGEX = re.compile(r"_Prf(?P<prf>[-+]?(?:\d+\.?\d*|\.\d+))(?:mW)?(?:_|$)")
 # Use UHD defaults by default; aggressive frame settings can trigger USB NO_MEM on some hosts.
 DEFAULT_UHD_ARGS = ""
@@ -82,11 +84,38 @@ def try_set_thread_priority(uhd_module) -> bool:
     return False
 
 
+def _tone_label(tone: int) -> str:
+    if tone == 0:
+        return "DC"
+    if tone == 1:
+        return "NB"
+    return f"N={tone}"
+
+
 def _parse_tone_bw_from_iq_name(path: Path) -> tuple[int, int] | None:
-    match = IQ_BW_REGEX.match(path.name)
+    match = IQ_MULTITONE_REGEX.match(path.name)
+    if match:
+        return int(match.group("n")), int(match.group("bw"))
+
+    match = IQ_DC_REGEX.match(path.name)
+    if match:
+        return 0, int(match.group("bw"))
+
+    match = IQ_NB_REGEX.match(path.name)
+    if match:
+        return 1, int(match.group("bw"))
+
+    return None
+
+
+def _parse_tx_gain_db_from_iq_name(path: Path) -> float | None:
+    match = TX_GAIN_REGEX.search(path.stem)
     if not match:
         return None
-    return int(match.group("n")), int(match.group("bw"))
+    try:
+        return float(match.group("gain"))
+    except ValueError:
+        return None
 
 
 def _parse_prf_mw_from_iq_name(path: Path) -> float | None:
@@ -109,12 +138,26 @@ def _read_npz_column_index(path: Path) -> int | None:
         return None
 
 
-def find_iq_file_for_tone_bw(iq_dir: Path, tone: int, bw_khz: int) -> Path:
+def _read_npz_tx_gain_db(path: Path) -> float | None:
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            if "tx_gain_db" not in data.files:
+                return None
+            value = float(np.asarray(data["tx_gain_db"]).squeeze())
+    except Exception:
+        return None
+
+    if not np.isfinite(value):
+        return None
+    return value
+
+
+def find_iq_file_for_tone_bw(iq_dir: Path, tone: int, bw_khz: int, gain_db: float | None = None) -> Path:
     if not iq_dir.exists():
         raise FileNotFoundError(f"IQ directory not found: {iq_dir.resolve()}")
 
     matches = []
-    for path in sorted(iq_dir.glob("iq_N*_BW*.npz")):
+    for path in sorted(iq_dir.glob("*.npz")):
         parsed = _parse_tone_bw_from_iq_name(path)
         if parsed is None:
             continue
@@ -126,31 +169,47 @@ def find_iq_file_for_tone_bw(iq_dir: Path, tone: int, bw_khz: int) -> Path:
         available = sorted(
             {
                 parsed
-                for path in iq_dir.glob("iq_N*_BW*.npz")
+                for path in iq_dir.glob("*.npz")
                 for parsed in [_parse_tone_bw_from_iq_name(path)]
                 if parsed is not None
             }
         )
         raise FileNotFoundError(
-            f"No IQ file found for tone={tone}, bw={bw_khz}kHz in {iq_dir.resolve()} "
-            f"(expected pattern iq_N<tone>_BW<bw>.npz). "
+            f"No IQ file found for {_tone_label(tone)}, bw={bw_khz}kHz in {iq_dir.resolve()} "
+            f"(expected iq_dc_BW<bw>.npz, iq_nb_BW<bw>.npz, or iq_N<tone>_BW<bw>_...). "
             f"Available (tone,bw_kHz): {available}"
         )
 
     if len(matches) == 1:
         return matches[0].resolve()
 
+    if gain_db is not None:
+        matched_by_gain = []
+        for path in matches:
+            tagged_gain = _parse_tx_gain_db_from_iq_name(path)
+            if tagged_gain is None:
+                tagged_gain = _read_npz_tx_gain_db(path)
+            if tagged_gain is None:
+                continue
+            if math.isclose(tagged_gain, gain_db, rel_tol=0.0, abs_tol=1e-6):
+                matched_by_gain.append(path)
+
+        if len(matched_by_gain) == 1:
+            return matched_by_gain[0].resolve()
+        if len(matched_by_gain) > 1:
+            raise RuntimeError(
+                f"Multiple IQ files found for {_tone_label(tone)}, bw={bw_khz}kHz, gain={gain_db:g} dB: "
+                f"{[p.name for p in matched_by_gain]}"
+            )
+
     preferred = [path for path in matches if "_col0" in path.stem]
     if len(preferred) == 1:
         return preferred[0].resolve()
 
-    # New exports may encode power in the filename (e.g. _Prf0.001mW) while
-    # preserving the selected input-power column in NPZ metadata.
     preferred = [path for path in matches if _read_npz_column_index(path) == 0]
     if len(preferred) == 1:
         return preferred[0].resolve()
 
-    # As a final fallback for multiple _Prf files, pick the lowest power.
     prf_candidates = []
     for path in matches:
         prf_mw = _parse_prf_mw_from_iq_name(path)
@@ -161,9 +220,18 @@ def find_iq_file_for_tone_bw(iq_dir: Path, tone: int, bw_khz: int) -> Path:
         prf_candidates.sort(key=lambda item: item[0])
         return prf_candidates[0][1].resolve()
 
+    available_gains = sorted(
+        {
+            gain
+            for path in matches
+            for gain in [_parse_tx_gain_db_from_iq_name(path), _read_npz_tx_gain_db(path)]
+            if gain is not None
+        }
+    )
     raise RuntimeError(
-        f"Multiple IQ files found for tone={tone}, bw={bw_khz}kHz: {[p.name for p in matches]}. "
-        "Keep one file per tone/bw (or include NPZ metadata column=0, or a _Prf<mW> tag) in data/tx_iq/."
+        f"Multiple IQ files found for {_tone_label(tone)}, bw={bw_khz}kHz: {[p.name for p in matches]}. "
+        f"Requested gain={gain_db:g} dB. Available tagged gains: {available_gains}. "
+        "Keep one file per request, or provide a gain that matches the IQ filename/metadata."
     )
 
 
@@ -302,7 +370,12 @@ def send_eob(uhd_module, tx_stream) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Replay IQ waveform NPZ on a USRP using UHD")
-    parser.add_argument("--tone", required=True, type=int, help="Tone count N (matches iq_N<N>_...)")
+    parser.add_argument(
+        "--tone",
+        required=True,
+        type=int,
+        help="Waveform selector: 0=DC, 1=NB, N>=2 matches iq_N<N>_...",
+    )
     parser.add_argument("--bw", required=True, type=int, help="Signal bandwidth in kHz (matches _BW<bw>)")
     parser.add_argument("--gain", required=True, type=float, help="TX gain in dB")
     parser.add_argument("--duration", default=10.0, type=float, help="Approximate replay duration in seconds")
@@ -319,7 +392,7 @@ def main() -> int:
     if args.duration <= 0:
         raise ValueError("--duration must be > 0")
 
-    iq_file = find_iq_file_for_tone_bw(IQ_DIR, args.tone, args.bw)
+    iq_file = find_iq_file_for_tone_bw(IQ_DIR, args.tone, args.bw, args.gain)
     iq, sample_rate_hz, center_freq_hz, avg_power, peak = load_iq_file(iq_file)
 
     print(f"Selected IQ file: {iq_file}")

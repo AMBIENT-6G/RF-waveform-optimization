@@ -22,6 +22,10 @@ def watts_to_dbm(power_w: float) -> float:
     return 10.0 * math.log10(power_w / 1e-3)
 
 
+def dbm_to_mw(power_dbm: float) -> float:
+    return math.pow(10.0, power_dbm / 10.0)
+
+
 def load_reference_levels(path: Path) -> list[float]:
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -83,16 +87,39 @@ def build_gain_power_rows(reference_levels_dbm: list[float], gain_points: list[d
                 "scope_power_dbm": best_match["scope_power_dbm"],
                 "gain_db": best_match["gain_db"],
                 "input_level_dbm": input_level_dbm,
+                "input_level_mw": dbm_to_mw(input_level_dbm),
             }
         )
 
     return rows
 
 
+def deduplicate_rows_by_gain(rows: list[dict[str, float]]) -> list[dict[str, float]]:
+    best_by_gain: dict[float, dict[str, float]] = {}
+
+    for row in rows:
+        gain_db = float(row["gain_db"])
+        candidate_error = abs(float(row["scope_power_dbm"]) - float(row["input_level_dbm"]))
+        current = best_by_gain.get(gain_db)
+
+        if current is None:
+            best_by_gain[gain_db] = row
+            continue
+
+        current_error = abs(float(current["scope_power_dbm"]) - float(current["input_level_dbm"]))
+        if candidate_error < current_error:
+            best_by_gain[gain_db] = row
+
+    return sorted(best_by_gain.values(), key=lambda row: float(row["input_level_dbm"]))
+
+
 def write_gain_power_csv(path: Path, rows: list[dict[str, float]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["scope_power_dbm", "gain_db", "input_level_dbm"])
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["scope_power_dbm", "gain_db", "input_level_dbm", "input_level_mw"],
+        )
         writer.writeheader()
         for row in rows:
             writer.writerow(
@@ -100,6 +127,7 @@ def write_gain_power_csv(path: Path, rows: list[dict[str, float]]) -> None:
                     "scope_power_dbm": f"{row['scope_power_dbm']:.12g}",
                     "gain_db": f"{row['gain_db']:.12g}",
                     "input_level_dbm": f"{row['input_level_dbm']:.12g}",
+                    "input_level_mw": f"{row['input_level_mw']:.12g}",
                 }
             )
 
@@ -143,6 +171,7 @@ def main() -> int:
     reference_levels_dbm = load_reference_levels(args.reference_csv)
     gain_points = load_scope_gain_points(args.scope_jsonl, tone=args.tone)
     rows = build_gain_power_rows(reference_levels_dbm, gain_points)
+    rows = deduplicate_rows_by_gain(rows)
     write_gain_power_csv(args.output_csv, rows)
     print(
         f"Wrote {len(rows)} rows to {args.output_csv} using tone={args.tone} "
