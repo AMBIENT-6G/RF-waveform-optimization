@@ -497,7 +497,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=10.0,
         help="How long to collect profiler readings per sweep in seconds (default: 10)",
     )
-    parser.add_argument("--port", default="COM4", help="Energy-profiler serial port (default: COM4)")
+    parser.add_argument(
+        "--port",
+        default="ttyUSB0",
+        help="Energy-profiler serial port (default: ttyUSB0)",
+    )
     parser.add_argument("--baudrate", type=int, default=115200, help="Serial baud rate (default: 115200)")
     parser.add_argument(
         "--serial-timeout",
