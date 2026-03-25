@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot power statistics versus configured gain for each tone."""
+"""Plot power statistics versus configured gain for each waveform."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import json
 import re
 import sys
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,22 @@ MEASUREMENT_STEM_SUFFIX = "meas-tones-power"
 MEASUREMENT_TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REFERENCE_CSV = REPO_ROOT / "data" / "reference" / "harvester-chart-data.csv"
-RF_CALIBRATION_REGEX = re.compile(r".*tone_gain_prf\.csv$", re.IGNORECASE)
+DEFAULT_GAIN_MAP_CSV = REPO_ROOT / "data" / "gain-power-map.csv"
+LEGACY_RF_CALIBRATION_REGEX = re.compile(r".*tone_gain_prf\.csv$", re.IGNORECASE)
+
+
+@dataclass
+class CalibrationLookup:
+    global_by_gain: dict[float, float]
+    by_tone: dict[int, dict[float, float]]
+
+
+def waveform_label_for_tone(tone: int) -> str:
+    if tone == 0:
+        return "DC"
+    if tone == 1:
+        return "NB"
+    return f"N={tone}"
 
 
 def pw_to_dbm(power_pw: np.ndarray | float) -> np.ndarray:
@@ -104,7 +120,7 @@ def choose_csv_column(fieldnames: list[str], candidates: tuple[str, ...]) -> str
     return None
 
 
-def load_rf_calibration_csv(path: Path) -> dict[int, dict[float, float]]:
+def load_rf_calibration_csv(path: Path) -> CalibrationLookup:
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         fieldnames = list(reader.fieldnames or [])
@@ -113,24 +129,25 @@ def load_rf_calibration_csv(path: Path) -> dict[int, dict[float, float]]:
 
         tone_col = choose_csv_column(fieldnames, ("tone",))
         gain_col = choose_csv_column(fieldnames, ("tx_gain_db", "gain_db", "configured_gain_db"))
-        power_col = choose_csv_column(fieldnames, ("p_rf_dbm", "prf_dbm", "input_power_dbm", "pin_dbm"))
+        power_col = choose_csv_column(
+            fieldnames,
+            ("input_level_dbm", "p_rf_dbm", "prf_dbm", "input_power_dbm", "pin_dbm"),
+        )
 
         missing = []
-        if tone_col is None:
-            missing.append("tone")
         if gain_col is None:
             missing.append("tx_gain_db/gain_db")
         if power_col is None:
-            missing.append("p_rf_dbm")
+            missing.append("input_level_dbm/p_rf_dbm")
         if missing:
             raise ValueError(
                 f"RF calibration CSV missing required column(s): {', '.join(missing)} in {path}"
             )
 
-        calibration: dict[int, dict[float, float]] = defaultdict(dict)
+        by_tone: dict[int, dict[float, float]] = defaultdict(dict)
+        global_by_gain: dict[float, float] = {}
         for line_number, row in enumerate(reader, start=2):
             try:
-                tone = int(float(row[tone_col]))  # type: ignore[index]
                 gain = float(row[gain_col])  # type: ignore[index]
                 power_dbm = float(row[power_col])  # type: ignore[index]
             except (TypeError, ValueError, KeyError) as exc:
@@ -140,35 +157,52 @@ def load_rf_calibration_csv(path: Path) -> dict[int, dict[float, float]]:
 
             if not np.isfinite(power_dbm):
                 continue
-            calibration[tone][gain_key(gain)] = power_dbm
+            if tone_col is not None:
+                raw_tone = row.get(tone_col)
+                if raw_tone not in (None, ""):
+                    tone = int(float(raw_tone))
+                    by_tone[tone][gain_key(gain)] = power_dbm
+                    continue
+            global_by_gain[gain_key(gain)] = power_dbm
 
-    if not calibration:
+    if not by_tone and not global_by_gain:
         raise ValueError(f"No usable calibration points found in {path}")
-    return {tone: dict(gain_map) for tone, gain_map in calibration.items()}
+    return CalibrationLookup(
+        global_by_gain=dict(global_by_gain),
+        by_tone={tone: dict(gain_map) for tone, gain_map in by_tone.items()},
+    )
 
 
 def discover_rf_calibration_files(search_dir: Path = Path("results")) -> list[Path]:
-    search_root = search_dir.resolve()
-    if not search_root.exists():
-        return []
+    candidates: list[Path] = []
 
-    candidates = [
-        path.resolve()
-        for path in search_root.rglob("*.csv")
-        if RF_CALIBRATION_REGEX.match(path.name)
-    ]
-    if not candidates and search_root != REPO_ROOT:
-        candidates = [
+    if DEFAULT_GAIN_MAP_CSV.exists():
+        candidates.append(DEFAULT_GAIN_MAP_CSV.resolve())
+
+    search_root = search_dir.resolve()
+    if search_root.exists():
+        candidates.extend(
+            path.resolve()
+            for path in search_root.rglob("*.csv")
+            if LEGACY_RF_CALIBRATION_REGEX.match(path.name)
+        )
+    if search_root != REPO_ROOT:
+        candidates.extend(
             path.resolve()
             for path in REPO_ROOT.rglob("*.csv")
-            if RF_CALIBRATION_REGEX.match(path.name)
-        ]
-    return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)
+            if LEGACY_RF_CALIBRATION_REGEX.match(path.name)
+        )
+
+    unique_candidates: list[Path] = []
+    for path in sorted(candidates, key=lambda item: item.stat().st_mtime, reverse=True):
+        if path not in unique_candidates:
+            unique_candidates.append(path)
+    return unique_candidates
 
 
 def build_input_power_lookup(
-    series: dict[int, dict[str, np.ndarray]],
-    rf_calibration: dict[int, dict[float, float]] | None,
+    series: dict[int, dict[str, Any]],
+    rf_calibration: CalibrationLookup | None,
     debug_calibration: bool = False,
 ) -> tuple[dict[int, np.ndarray], bool]:
     input_power_dbm_by_tone: dict[int, np.ndarray] = {}
@@ -176,16 +210,19 @@ def build_input_power_lookup(
 
     for tone in sorted(series):
         gains = np.asarray(series[tone]["gains"], dtype=float)
+        waveform_label = str(series[tone].get("label", waveform_label_for_tone(tone)))
         inferred = gain_to_input_power_dbm(gains)
 
         if rf_calibration is None:
             input_power_dbm_by_tone[tone] = inferred
             continue
 
-        tone_map = rf_calibration.get(int(tone))
+        tone_map = rf_calibration.by_tone.get(int(tone))
+        if not tone_map and rf_calibration.global_by_gain:
+            tone_map = rf_calibration.global_by_gain
         if not tone_map:
             print(
-                f"Warning: tone {tone} missing in RF calibration CSV; using inferred Pin = gain - 80 dBm."
+                f"Warning: {waveform_label} missing in RF calibration CSV; using inferred Pin = gain - 80 dBm."
             )
             input_power_dbm_by_tone[tone] = inferred
             continue
@@ -194,20 +231,20 @@ def build_input_power_lookup(
             gains,
             calibration_by_gain=tone_map,
             debug=debug_calibration,
-            debug_label=f"tone={tone}",
+            debug_label=waveform_label,
         )
         matched = int(np.count_nonzero(np.isfinite(calibrated)))
 
         if matched == 0:
             print(
-                f"Warning: tone {tone} has no gain matches in RF calibration CSV; using inferred Pin = gain - 80 dBm."
+                f"Warning: {waveform_label} has no gain matches in RF calibration CSV; using inferred Pin = gain - 80 dBm."
             )
             input_power_dbm_by_tone[tone] = inferred
             continue
 
         if matched < gains.size:
             print(
-                f"Warning: tone {tone} missing {gains.size - matched} calibrated gain point(s); "
+                f"Warning: {waveform_label} missing {gains.size - matched} calibrated gain point(s); "
                 "dropping those points from input-power plots."
             )
 
@@ -255,22 +292,55 @@ def measurement_sort_key(path: Path) -> tuple[int, float]:
     return (0, path.stat().st_mtime)
 
 
+def resolve_results_dir(path: Path) -> Path:
+    if path.is_absolute():
+        return path
+
+    cwd_candidate = path.resolve()
+    repo_candidate = (REPO_ROOT / path).resolve()
+
+    if cwd_candidate.exists():
+        return cwd_candidate
+    if repo_candidate.exists():
+        return repo_candidate
+    return repo_candidate
+
+
+def candidate_search_roots(search_dir: Path) -> list[Path]:
+    if search_dir.is_absolute():
+        return [search_dir.resolve()]
+
+    roots = [search_dir.resolve(), (REPO_ROOT / search_dir).resolve()]
+    unique_roots: list[Path] = []
+    for root in roots:
+        if root not in unique_roots:
+            unique_roots.append(root)
+    return unique_roots
+
+
 def discover_measurement_files(search_dir: Path = Path("results")) -> list[Path]:
-    search_root = search_dir.resolve()
-    if not search_root.exists():
-        return []
-    candidates = [path.resolve() for path in search_root.rglob("*") if is_measurement_file(path)]
-    if not candidates and search_root != REPO_ROOT:
-        candidates = [path.resolve() for path in REPO_ROOT.rglob("*") if is_measurement_file(path)]
-    return sorted(candidates, key=measurement_sort_key, reverse=True)
+    candidates: list[Path] = []
+    for search_root in candidate_search_roots(search_dir):
+        if not search_root.exists():
+            continue
+        candidates.extend(path.resolve() for path in search_root.rglob("*") if is_measurement_file(path))
+
+    if not candidates:
+        candidates.extend(path.resolve() for path in REPO_ROOT.rglob("*") if is_measurement_file(path))
+
+    unique_candidates: list[Path] = []
+    for path in sorted(candidates, key=measurement_sort_key, reverse=True):
+        if path not in unique_candidates:
+            unique_candidates.append(path)
+    return unique_candidates
 
 
-def resolve_input_paths(input_path: Path | None, include_all: bool) -> list[Path]:
+def resolve_input_paths(input_path: Path | None, include_all: bool, search_dir: Path) -> list[Path]:
     if include_all:
-        matches = discover_measurement_files()
+        matches = discover_measurement_files(search_dir=search_dir)
         if not matches:
             raise FileNotFoundError(
-                f"No measurement files found in {Path('.').resolve()} matching '*{MEASUREMENT_STEM_SUFFIX}*.jsonl'"
+                f"No measurement files found in {search_dir.resolve()} matching '*{MEASUREMENT_STEM_SUFFIX}*.jsonl'"
             )
         return matches
 
@@ -280,10 +350,10 @@ def resolve_input_paths(input_path: Path | None, include_all: bool) -> list[Path
             raise FileNotFoundError(f"Input file not found: {input_path}")
         return [resolved]
 
-    matches = discover_measurement_files()
+    matches = discover_measurement_files(search_dir=search_dir)
     if not matches:
         raise FileNotFoundError(
-            f"No measurement files found in {Path('.').resolve()} matching '*{MEASUREMENT_STEM_SUFFIX}*.jsonl'"
+            f"No measurement files found in {search_dir.resolve()} matching '*{MEASUREMENT_STEM_SUFFIX}*.jsonl'"
         )
     return [matches[0]]
 
@@ -342,6 +412,28 @@ def flatten_mapping_records(mapping: dict[str, Any]) -> list[dict[str, Any]]:
     return records
 
 
+def extract_waveform_labels(records: list[dict[str, Any]]) -> dict[int, str]:
+    labels: dict[int, str] = {}
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+
+        tone = record.get("tone")
+        try:
+            tone_int = int(tone)
+        except (TypeError, ValueError):
+            continue
+
+        label = record.get("waveform_label")
+        if isinstance(label, str) and label.strip():
+            labels[tone_int] = label.strip()
+        else:
+            labels.setdefault(tone_int, waveform_label_for_tone(tone_int))
+
+    return labels
+
+
 def parse_key_pair(key: str) -> tuple[int, float]:
     cleaned = key.strip().strip("()")
     parts = [item.strip() for item in cleaned.split(",")]
@@ -380,8 +472,9 @@ def group_power_by_tone_gain(
 def build_series(
     grouped: dict[int, dict[float, list[float]]],
     percentiles: tuple[float, float],
-) -> dict[int, dict[str, np.ndarray]]:
-    series: dict[int, dict[str, np.ndarray]] = {}
+    waveform_labels: dict[int, str] | None = None,
+) -> dict[int, dict[str, Any]]:
+    series: dict[int, dict[str, Any]] = {}
 
     for tone, gain_map in sorted(grouped.items()):
         gains = np.array(sorted(gain_map), dtype=float)
@@ -396,6 +489,11 @@ def build_series(
             percentile_b_values.append(float(np.percentile(power_values, percentiles[1])))
 
         series[tone] = {
+            "label": (
+                waveform_labels.get(tone, waveform_label_for_tone(tone))
+                if waveform_labels is not None
+                else waveform_label_for_tone(tone)
+            ),
             "gains": gains,
             "mean": np.asarray(mean_values, dtype=float),
             f"p{percentiles[0]:g}": np.asarray(percentile_a_values, dtype=float),
@@ -474,7 +572,7 @@ def load_reference_efficiency(path: Path) -> tuple[np.ndarray, np.ndarray] | Non
 
 
 def plot_series(
-    series: dict[int, dict[str, np.ndarray]],
+    series: dict[int, dict[str, Any]],
     percentiles: tuple[float, float],
     power_key: str,
     output: Path | None,
@@ -504,13 +602,14 @@ def plot_series(
             else tone_series[f"p{percentiles[1]:g}"]
         )
         color = color_map(index % color_map.N)
+        waveform_label = str(tone_series.get("label", waveform_label_for_tone(tone)))
         axis.plot(
             tone_series["gains"],
             mean_values,
             color=color,
             linewidth=2,
             linestyle="-",
-            label=f"Tone {tone}",
+            label=waveform_label,
         )
         axis.plot(
             tone_series["gains"],
@@ -540,7 +639,7 @@ def plot_series(
 
 
 def plot_average_markers(
-    series: dict[int, dict[str, np.ndarray]],
+    series: dict[int, dict[str, Any]],
     power_key: str,
     output: Path | None,
 ):
@@ -557,13 +656,14 @@ def plot_average_markers(
         tone_series = series[tone]
         mean_values = pw_to_dbm(tone_series["mean"]) if use_dbm else tone_series["mean"]
         color = color_map(index % color_map.N)
+        waveform_label = str(tone_series.get("label", waveform_label_for_tone(tone)))
         axis.plot(
             tone_series["gains"],
             mean_values,
             color=color,
             marker="o",
             linestyle="None",
-            label=f"Tone {tone}",
+            label=waveform_label,
         )
 
     fig.suptitle(title_suffix)
@@ -577,7 +677,7 @@ def plot_average_markers(
 
 
 def plot_efficiency_markers(
-    series: dict[int, dict[str, np.ndarray]],
+    series: dict[int, dict[str, Any]],
     percentiles: tuple[float, float],
     power_key: str,
     output: Path | None,
@@ -597,6 +697,7 @@ def plot_efficiency_markers(
 
     for index, tone in enumerate(sorted(series)):
         tone_series = series[tone]
+        waveform_label = str(tone_series.get("label", waveform_label_for_tone(tone)))
         if input_power_dbm_by_tone is not None and tone in input_power_dbm_by_tone:
             input_power_dbm = np.asarray(input_power_dbm_by_tone[tone], dtype=float)
         else:
@@ -630,7 +731,7 @@ def plot_efficiency_markers(
             & np.isfinite(percentile_b_efficiency_pct)
         )
         if not np.any(valid):
-            print(f"Warning: skipping tone {tone} in efficiency plot (no valid input-power points).")
+            print(f"Warning: skipping {waveform_label} in efficiency plot (no valid input-power points).")
             continue
         input_power_dbm = input_power_dbm[valid]
         efficiency_pct = efficiency_pct[valid]
@@ -648,7 +749,7 @@ def plot_efficiency_markers(
             color=color,
             linewidth=1.5,
             linestyle="-",
-            label=f"Tone {tone}",
+            label=waveform_label,
         )
         axis.fill_between(
             input_power_dbm,
@@ -692,7 +793,7 @@ def plot_efficiency_markers(
 
 
 def plot_input_output_mw_markers(
-    series: dict[int, dict[str, np.ndarray]],
+    series: dict[int, dict[str, Any]],
     power_key: str,
     output: Path | None,
     input_power_dbm_by_tone: dict[int, np.ndarray] | None = None,
@@ -709,6 +810,7 @@ def plot_input_output_mw_markers(
 
     for index, tone in enumerate(sorted(series)):
         tone_series = series[tone]
+        waveform_label = str(tone_series.get("label", waveform_label_for_tone(tone)))
         if input_power_dbm_by_tone is not None and tone in input_power_dbm_by_tone:
             input_power_dbm = np.asarray(input_power_dbm_by_tone[tone], dtype=float)
         else:
@@ -717,7 +819,7 @@ def plot_input_output_mw_markers(
         output_power_mw = watts_to_mw(pw_to_watts(tone_series["mean"]))
         valid = np.isfinite(input_power_mw) & np.isfinite(output_power_mw) & (input_power_mw > 0)
         if not np.any(valid):
-            print(f"Warning: skipping tone {tone} in input/output plot (no valid input-power points).")
+            print(f"Warning: skipping {waveform_label} in input/output plot (no valid input-power points).")
             continue
         input_power_mw = input_power_mw[valid]
         output_power_mw = output_power_mw[valid]
@@ -732,7 +834,7 @@ def plot_input_output_mw_markers(
             marker="o",
             linestyle="-",
             linewidth=1.5,
-            label=f"Tone {tone} data",
+            label=f"{waveform_label} data",
         )
 
     title_prefix = "calibrated" if use_calibrated_input else "inferred"
@@ -747,7 +849,7 @@ def plot_input_output_mw_markers(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Plot power statistics versus configured gain for each tone")
+    parser = argparse.ArgumentParser(description="Plot power statistics versus configured gain for each waveform")
     parser.add_argument(
         "input",
         nargs="?",
@@ -793,9 +895,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Optional CSV with columns tone, tx_gain_db, p_rf_dbm. "
-            "Used to calibrate input-power x-axes instead of Pin = gain - 80 dBm. "
-            "If omitted, the newest '*tone_gain_prf.csv' is auto-discovered by regex."
+            "Optional CSV used to calibrate input-power x-axes instead of Pin = gain - 80 dBm. "
+            "Supports the current data/gain-power-map.csv format (gain_db,input_level_dbm) "
+            "and legacy per-tone CSVs such as *tone_gain_prf.csv*."
         ),
     )
     parser.add_argument(
@@ -818,10 +920,10 @@ def main() -> int:
     if args.all and args.output is not None:
         raise ValueError("--output cannot be used with --all because each input file gets its own output name")
 
-    input_paths = resolve_input_paths(args.input, include_all=args.all)
+    results_dir = resolve_results_dir(args.results_dir)
+    input_paths = resolve_input_paths(args.input, include_all=args.all, search_dir=results_dir)
     all_figures = []
     plt_module = None
-    results_dir = args.results_dir.resolve()
     rf_calibration = None
     rf_calibration_path: Path | None = None
     if args.rf_calibration_csv is not None:
@@ -832,10 +934,7 @@ def main() -> int:
         discovered = discover_rf_calibration_files(results_dir)
         if discovered:
             rf_calibration_path = discovered[0]
-            print(
-                f"Auto-discovered RF calibration CSV via regex "
-                f"'{RF_CALIBRATION_REGEX.pattern}': {rf_calibration_path}"
-            )
+            print(f"Auto-discovered RF calibration CSV: {rf_calibration_path}")
 
     if rf_calibration_path is not None:
         rf_calibration = load_rf_calibration_csv(rf_calibration_path)
@@ -857,8 +956,9 @@ def main() -> int:
         )
         print(f"Processing {input_path}")
         records = load_records(input_path)
+        waveform_labels = extract_waveform_labels(records)
         grouped = group_power_by_tone_gain(records, power_key=args.power_key)
-        series = build_series(grouped, percentiles=args.percentiles)
+        series = build_series(grouped, percentiles=args.percentiles, waveform_labels=waveform_labels)
         input_power_dbm_by_tone, used_calibration = build_input_power_lookup(
             series,
             rf_calibration=rf_calibration,
