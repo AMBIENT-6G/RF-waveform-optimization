@@ -2,6 +2,7 @@ numpy
 scipy
 matplotlib
 pyserial
+pyzmq
 pyyaml
 pyvisa-py
 git+https://github.com/techtile-by-dramco/scope

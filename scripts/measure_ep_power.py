@@ -5,9 +5,10 @@ Default behavior:
 - tones: 0, 1, 4, 8, 16, 32 (0 = DC, 1 = NB)
 - gains: auto-discovered from gain-tagged IQ files when available
 - optional explicit gain sweeps require --gain-start, --gain-stop, and --gain-step together
+- waits for a localhost ZMQ ``tx_started`` event from ``tx_waveform.py`` before sampling
+- derives measurement window as 90% of ``--tx-duration``
 - launches ``tx_waveform.py`` for each tone/gain combination
-- waits 10 s before sampling the energy profiler
-- records profiler readings for 10 s
+- stops sampling early on a ZMQ ``tx_done`` event and trims the last 10 samples
 - waits for the TX process to finish
 - appends one JSON object per sweep to the output file
 """
@@ -29,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import serial
+import zmq
 
 from run_layout import resolve_output_path, timestamp_run_id, write_manifest
 
@@ -39,6 +41,11 @@ READING_PAYLOAD_SIZE = struct.calcsize(READING_FORMAT)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IQ_DIR = REPO_ROOT / "data" / "tx_iq"
 TX_GAIN_REGEX = re.compile(r"_TXG(?P<gain>[-+]?(?:\d+\.?\d*|\.\d+))db(?:_|$)", re.IGNORECASE)
+TX_NOTIFY_HOST = "127.0.0.1"
+MEASURE_WINDOW_FRACTION = 0.9
+TX_NOTIFY_POLL_TIMEOUT_MS = 50
+TX_DONE_TRIM_SAMPLES = 10
+EP_SERIAL_POLL_TIMEOUT_S = 0.05
 
 
 def xor_checksum(data: bytes) -> int:
@@ -112,6 +119,77 @@ def build_gain_values(start: float, stop: float, step: float) -> list[float]:
             current += step
 
     return gains
+
+
+def derive_measure_window_s(tx_duration_s: float) -> float:
+    return float(tx_duration_s) * MEASURE_WINDOW_FRACTION
+
+
+def trim_trailing_samples(
+    readings: list[dict[str, int]],
+    trim_count: int = TX_DONE_TRIM_SAMPLES,
+) -> tuple[list[dict[str, int]], int]:
+    trimmed = min(max(trim_count, 0), len(readings))
+    if trimmed == 0:
+        return list(readings), 0
+    return list(readings[:-trimmed]), trimmed
+
+
+def create_tx_notify_socket(context: zmq.Context[Any]) -> tuple[zmq.Socket[Any], str]:
+    socket = context.socket(zmq.PULL)
+    socket.setsockopt(zmq.LINGER, 0)
+    port = socket.bind_to_random_port(f"tcp://{TX_NOTIFY_HOST}")
+    return socket, f"tcp://{TX_NOTIFY_HOST}:{port}"
+
+
+def recv_tx_event_nonblocking(socket: zmq.Socket[Any]) -> dict[str, Any] | None:
+    try:
+        event = socket.recv_json(flags=zmq.NOBLOCK)
+    except zmq.Again:
+        return None
+
+    if not isinstance(event, dict):
+        raise RuntimeError(f"Unexpected TX notify payload type: {type(event).__name__}")
+    return event
+
+
+def wait_for_tx_started(
+    process: subprocess.Popen[bytes],
+    notify_socket: zmq.Socket[Any],
+    timeout_s: float,
+) -> dict[str, Any]:
+    poller = zmq.Poller()
+    poller.register(notify_socket, zmq.POLLIN)
+    deadline = time.monotonic() + timeout_s
+
+    while True:
+        exit_code = process.poll()
+        if exit_code is not None:
+            raise RuntimeError(
+                f"tx_waveform.py exited with code {exit_code} before sending tx_started"
+            )
+
+        remaining_s = deadline - time.monotonic()
+        if remaining_s <= 0:
+            raise TimeoutError(
+                f"Timed out after {timeout_s:g}s waiting for tx_started from tx_waveform.py"
+            )
+
+        timeout_ms = max(1, min(int(remaining_s * 1000), TX_NOTIFY_POLL_TIMEOUT_MS))
+        if notify_socket not in dict(poller.poll(timeout_ms)):
+            continue
+
+        while True:
+            event = recv_tx_event_nonblocking(notify_socket)
+            if event is None:
+                break
+
+            event_name = str(event.get("event", ""))
+            if event_name == "tx_started":
+                return event
+            if event_name == "tx_done":
+                raise RuntimeError("Received tx_done before tx_started from tx_waveform.py")
+            print(f"Warning: ignoring unexpected TX notify event before start: {event!r}")
 
 
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
@@ -355,16 +433,66 @@ class EnergyProfiler:
         self.serial_port.flush()
 
 
-def collect_measurements(profiler: EnergyProfiler, window_s: float) -> list[dict[str, int]]:
+def collect_measurements_until_stop(
+    profiler: EnergyProfiler,
+    process: subprocess.Popen[bytes],
+    notify_socket: zmq.Socket[Any],
+    window_s: float,
+) -> tuple[list[dict[str, int]], str, int]:
     deadline = time.monotonic() + window_s
-    measurements = []
+    measurements: list[dict[str, int]] = []
+    stop_reason = "window_elapsed"
+    trimmed_count = 0
+    original_timeout = profiler.serial_port.timeout
+    short_timeout = EP_SERIAL_POLL_TIMEOUT_S if original_timeout is None else min(float(original_timeout), EP_SERIAL_POLL_TIMEOUT_S)
+    profiler.serial_port.timeout = short_timeout
 
-    while time.monotonic() < deadline:
-        measurement = profiler.get_measurement()
-        if measurement is not None:
-            measurements.append(measurement)
+    try:
+        while True:
+            if time.monotonic() >= deadline:
+                stop_reason = "window_elapsed"
+                break
 
-    return measurements
+            while True:
+                event = recv_tx_event_nonblocking(notify_socket)
+                if event is None:
+                    break
+                event_name = str(event.get("event", ""))
+                if event_name == "tx_done":
+                    stop_reason = "tx_done"
+                    break
+                if event_name != "tx_started":
+                    print(f"Warning: ignoring unexpected TX notify event during collection: {event!r}")
+            if stop_reason == "tx_done":
+                break
+
+            if process.poll() is not None:
+                stop_reason = "tx_process_exited"
+                break
+
+            measurement = profiler.get_measurement()
+            if measurement is not None:
+                measurements.append(measurement)
+
+            while True:
+                event = recv_tx_event_nonblocking(notify_socket)
+                if event is None:
+                    break
+                event_name = str(event.get("event", ""))
+                if event_name == "tx_done":
+                    stop_reason = "tx_done"
+                    break
+                if event_name != "tx_started":
+                    print(f"Warning: ignoring unexpected TX notify event during collection: {event!r}")
+            if stop_reason == "tx_done":
+                break
+
+        if stop_reason == "tx_done":
+            measurements, trimmed_count = trim_trailing_samples(measurements)
+    finally:
+        profiler.serial_port.timeout = original_timeout
+
+    return measurements, stop_reason, trimmed_count
 
 
 def launch_tx_process(
@@ -376,6 +504,7 @@ def launch_tx_process(
     duration_s: float,
     *,
     closest_gain_match: bool = False,
+    tx_notify_endpoint: str | None = None,
 ) -> subprocess.Popen[bytes]:
     command = [
         python_executable,
@@ -391,6 +520,8 @@ def launch_tx_process(
     ]
     if closest_gain_match:
         command.append("--closest-gain-match")
+    if tx_notify_endpoint is not None:
+        command.extend(["--tx-notify-endpoint", tx_notify_endpoint])
     print(f"Launching TX: {' '.join(command)}")
     return subprocess.Popen(command)
 
@@ -429,6 +560,7 @@ def wait_for_process(process: subprocess.Popen[bytes]) -> int:
 
 def run_sweep(args: argparse.Namespace) -> int:
     profiler = EnergyProfiler(args.port, args.baudrate, args.serial_timeout)
+    zmq_context = zmq.Context()
     tx_script = Path(__file__).with_name("tx_waveform.py").resolve()
     if not IQ_DIR.exists():
         raise FileNotFoundError(f"IQ directory not found: {IQ_DIR.resolve()}")
@@ -472,34 +604,72 @@ def run_sweep(args: argparse.Namespace) -> int:
         for entry in sweep_plan:
             tone = int(entry["tone"])
             gain = float(entry["gain_db"])
+            measure_window_s = derive_measure_window_s(args.tx_duration)
+            if measure_window_s <= 0:
+                raise ValueError(
+                    f"Derived measurement window must be > 0, got {measure_window_s!r}"
+                )
+            notify_socket, notify_endpoint = create_tx_notify_socket(zmq_context)
             print(
                 f"Starting sweep: {entry['waveform_label']}, gain={gain:g} dB, iq_file={Path(entry['iq_file']).name}"
             )
-            process = launch_tx_process(
-                python_executable=args.python,
-                tx_script=tx_script,
-                tone=tone,
-                bandwidth_khz=args.bw,
-                gain_db=gain,
-                duration_s=args.tx_duration,
-                closest_gain_match=closest_gain_match,
-            )
-
-            started_at = utc_now_iso()
-            sweep_started = time.monotonic()
             try:
-                time.sleep(args.pre_measure_delay)
-                readings = collect_measurements(profiler, args.measure_window)
-                exit_code = wait_for_process(process)
-            except Exception:
-                if process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait()
-                raise
+                process = launch_tx_process(
+                    python_executable=args.python,
+                    tx_script=tx_script,
+                    tone=tone,
+                    bandwidth_khz=args.bw,
+                    gain_db=gain,
+                    duration_s=args.tx_duration,
+                    closest_gain_match=closest_gain_match,
+                    tx_notify_endpoint=notify_endpoint,
+                )
+
+                started_at = utc_now_iso()
+                sweep_started = time.monotonic()
+                try:
+                    wait_for_tx_started(
+                        process,
+                        notify_socket,
+                        args.tx_start_timeout,
+                    )
+                    print(
+                        f"Received tx_started for {entry['waveform_label']}, gain={gain:g} dB; "
+                        f"starting EP collection for up to {measure_window_s:.3f}s"
+                    )
+                    readings, stop_reason, trimmed_count = collect_measurements_until_stop(
+                        profiler,
+                        process,
+                        notify_socket,
+                        measure_window_s,
+                    )
+                    if stop_reason == "tx_done":
+                        print(
+                            f"Received tx_done while collecting {entry['waveform_label']}, gain={gain:g} dB; "
+                            f"trimmed {trimmed_count} trailing sample(s)."
+                        )
+                    elif stop_reason == "tx_process_exited":
+                        print(
+                            f"TX process exited before tx_done for {entry['waveform_label']}, gain={gain:g} dB; "
+                            "stopping EP collection without trim."
+                        )
+                    else:
+                        print(
+                            f"EP collection completed full derived window for {entry['waveform_label']}, "
+                            f"gain={gain:g} dB."
+                        )
+                    exit_code = wait_for_process(process)
+                except Exception:
+                    if process.poll() is None:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                    raise
+            finally:
+                notify_socket.close(0)
 
             if exit_code != 0:
                 raise RuntimeError(
@@ -517,8 +687,8 @@ def run_sweep(args: argparse.Namespace) -> int:
                 "bw_khz": args.bw,
                 "gain_db": gain,
                 "tx_duration_s": args.tx_duration,
-                "pre_measure_delay_s": args.pre_measure_delay,
-                "measure_window_s": args.measure_window,
+                "pre_measure_delay_s": 0.0,
+                "measure_window_s": measure_window_s,
                 "sweep_duration_s": round(sweep_duration_s, 3),
                 "reading_count": len(readings),
                 "readings": readings,
@@ -531,6 +701,7 @@ def run_sweep(args: argparse.Namespace) -> int:
             )
     finally:
         profiler.close()
+        zmq_context.term()
 
     print(f"Completed {completed_sweeps} sweeps.")
     return 0
@@ -565,16 +736,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--tx-duration", type=float, default=20.0, help="TX duration in seconds (default: 20)")
     parser.add_argument(
-        "--pre-measure-delay",
+        "--tx-start-timeout",
         type=float,
-        default=10.0,
-        help="Delay after starting TX before sampling the profiler (default: 10)",
-    )
-    parser.add_argument(
-        "--measure-window",
-        type=float,
-        default=10.0,
-        help="How long to collect profiler readings per sweep in seconds (default: 10)",
+        default=15.0,
+        help="How long to wait for tx_waveform.py to emit tx_started over ZMQ before failing the sweep (default: 15)",
     )
     parser.add_argument(
         "--port",
@@ -646,10 +811,8 @@ def main() -> int:
         raise ValueError("--bw must be > 0")
     if args.tx_duration <= 0:
         raise ValueError("--tx-duration must be > 0")
-    if args.pre_measure_delay < 0:
-        raise ValueError("--pre-measure-delay must be >= 0")
-    if args.measure_window <= 0:
-        raise ValueError("--measure-window must be > 0")
+    if args.tx_start_timeout <= 0:
+        raise ValueError("--tx-start-timeout must be > 0")
     if args.serial_timeout <= 0:
         raise ValueError("--serial-timeout must be > 0")
     if args.target_voltage is not None and not (0 <= args.target_voltage <= 0xFFFFFFFF):

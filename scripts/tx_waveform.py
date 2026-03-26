@@ -14,10 +14,13 @@ import argparse
 import math
 import re
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
+import zmq
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +39,117 @@ SETTLE_DELAY_S = 1.0
 TX_CHANNEL = 0
 TX_ANTENNA_PREFERRED = "TX/RX"
 MAX_ZERO_SENDS = 16
+
+
+class TxEventNotifier:
+    def __init__(
+        self,
+        endpoint: str | None,
+        *,
+        tone: int,
+        bw_khz: int,
+        gain_db: float,
+        iq_file: Path,
+    ) -> None:
+        self._tone = int(tone)
+        self._bw_khz = int(bw_khz)
+        self._gain_db = float(gain_db)
+        self._iq_file = str(iq_file)
+        self._started_sent = False
+        self._started_thread: threading.Thread | None = None
+        self._async_error: RuntimeError | None = None
+        self._lock = threading.Lock()
+        self._context: zmq.Context[Any] | None = None
+        self._socket: zmq.Socket[Any] | None = None
+
+        if endpoint is None:
+            return
+
+        self._context = zmq.Context()
+        self._socket = self._context.socket(zmq.PUSH)
+        self._socket.setsockopt(zmq.LINGER, 0)
+        self._socket.connect(endpoint)
+
+    def close(self) -> None:
+        if self._socket is not None:
+            self._socket.close(0)
+            self._socket = None
+        if self._context is not None:
+            self._context.term()
+            self._context = None
+
+    def _raise_async_error(self) -> None:
+        if self._async_error is not None:
+            raise self._async_error
+
+    def _send_event(self, event_name: str) -> None:
+        if self._socket is None:
+            return
+
+        payload = {
+            "event": event_name,
+            "tone": self._tone,
+            "bw_khz": self._bw_khz,
+            "gain_db": self._gain_db,
+            "iq_file": self._iq_file,
+        }
+        try:
+            self._socket.send_json(payload)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to send {event_name} notification over ZMQ: {exc}") from exc
+
+    def _send_started_after_delay(self, delay_s: float) -> None:
+        try:
+            if delay_s > 0:
+                time.sleep(delay_s)
+            with self._lock:
+                if self._started_sent:
+                    return
+                self._send_event("tx_started")
+                self._started_sent = True
+        except RuntimeError as exc:
+            self._async_error = exc
+
+    def schedule_started(self, not_before_monotonic: float | None) -> None:
+        if self._socket is None:
+            return
+
+        with self._lock:
+            if self._started_sent or self._started_thread is not None:
+                return
+            delay_s = 0.0
+            if not_before_monotonic is not None:
+                delay_s = max(0.0, not_before_monotonic - time.monotonic())
+            if delay_s <= 0:
+                self._send_event("tx_started")
+                self._started_sent = True
+                return
+
+            self._started_thread = threading.Thread(
+                target=self._send_started_after_delay,
+                args=(delay_s,),
+                daemon=True,
+            )
+            self._started_thread.start()
+
+    def ensure_started_sent(self) -> None:
+        thread = self._started_thread
+        if thread is not None:
+            thread.join()
+            self._started_thread = None
+        self._raise_async_error()
+        if self._socket is not None and not self._started_sent:
+            self._send_event("tx_started")
+            self._started_sent = True
+
+    def check(self) -> None:
+        self._raise_async_error()
+
+    def send_done(self) -> None:
+        if self._socket is None:
+            return
+        self.ensure_started_sent()
+        self._send_event("tx_done")
 
 
 def _set_with_channel(fn, value, channel: int) -> None:
@@ -318,7 +432,9 @@ def make_start_metadata(uhd_module, usrp, start_delay_s: float):
     md.start_of_burst = True
     md.end_of_burst = False
     md.has_time_spec = False
+    started_not_before_monotonic = None
     if start_delay_s > 0:
+        started_not_before_monotonic = time.monotonic() + start_delay_s
         try:
             now = usrp.get_time_now().get_real_secs()
             md.time_spec = uhd_module.types.TimeSpec(now + start_delay_s)
@@ -327,10 +443,19 @@ def make_start_metadata(uhd_module, usrp, start_delay_s: float):
             # Fallback when timed metadata APIs differ by UHD version.
             time.sleep(start_delay_s)
             md.has_time_spec = False
-    return md
+            started_not_before_monotonic = None
+    return md, started_not_before_monotonic
 
 
-def send_buffered(tx_stream, samples: np.ndarray, md, spb: int, send_timeout_s: float) -> None:
+def send_buffered(
+    tx_stream,
+    samples: np.ndarray,
+    md,
+    spb: int,
+    send_timeout_s: float,
+    *,
+    on_first_payload_accepted=None,
+) -> None:
     offset = 0
     total = int(samples.size)
     first = True
@@ -361,6 +486,8 @@ def send_buffered(tx_stream, samples: np.ndarray, md, spb: int, send_timeout_s: 
         offset += sent
 
         if first:
+            if on_first_payload_accepted is not None:
+                on_first_payload_accepted()
             md.start_of_burst = False
             md.has_time_spec = False
             first = False
@@ -394,6 +521,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--closest-gain-match",
         action="store_true",
         help="For multitone files, use the closest tagged IQ gain when no exact gain-tagged file exists.",
+    )
+    parser.add_argument(
+        "--tx-notify-endpoint",
+        default=None,
+        help="Internal localhost ZMQ endpoint used to notify a supervising process about tx_started and tx_done.",
     )
     parser.add_argument("--duration", default=10.0, type=float, help="Approximate replay duration in seconds")
     parser.add_argument("--uhd-args", default=DEFAULT_UHD_ARGS, type=str, help="UHD device args string")
@@ -460,16 +592,33 @@ def main() -> int:
         f"start_delay={START_DELAY_S:.3f}s, uhd_args='{args.uhd_args}'"
     )
 
-    md = make_start_metadata(uhd, usrp, START_DELAY_S)
+    notifier = TxEventNotifier(
+        args.tx_notify_endpoint,
+        tone=args.tone,
+        bw_khz=args.bw,
+        gain_db=args.gain,
+        iq_file=iq_file,
+    )
+    md, started_not_before_monotonic = make_start_metadata(uhd, usrp, START_DELAY_S)
     try:
         for _ in range(n_repeats):
-            send_buffered(tx_stream, iq, md, spb, DEFAULT_SEND_TIMEOUT_S)
+            send_buffered(
+                tx_stream,
+                iq,
+                md,
+                spb,
+                DEFAULT_SEND_TIMEOUT_S,
+                on_first_payload_accepted=lambda: notifier.schedule_started(started_not_before_monotonic),
+            )
+            notifier.check()
+        notifier.send_done()
     finally:
         print("Stopping TX (sending end-of-burst)...")
         try:
             send_eob(uhd, tx_stream)
         except Exception as exc:
             print(f"WARNING: Failed to send EOB cleanly: {exc}")
+        notifier.close()
 
     print("Done.")
     return 0

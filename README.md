@@ -126,6 +126,7 @@ multitone `iq_N*_BW*_TXG*db.npz` files to reflect the new mapping.
 python3 scripts/measure_ep_power.py \
   --tones 0,1,4,8,16,32 \
   --bw 1000 \
+  --gain-start 50 --gain-stop 80 --gain-step 0.2 \
   --tx-duration 20 \
   --run-id 20260304_172559
 ```
@@ -151,6 +152,15 @@ If you want an explicit gain sweep, provide `--gain-start`, `--gain-stop`, and
 
 Example: requesting `--gain-start 80 --gain-stop 80 --gain-step 1` for `tone=32`
 will use `iq_N32_BW1000_TXG80.2db.npz` when that is the nearest tagged file.
+
+During EP sweeps, `measure_ep_power.py` now waits for a localhost ZMQ
+`tx_started` event from `tx_waveform.py` before sampling. The measurement window
+is derived automatically as `0.9 * --tx-duration`.
+
+If `tx_done` arrives while EP sampling is still active, collection stops
+immediately and the last 10 EP samples are discarded. Use `--tx-start-timeout`
+to control how long `measure_ep_power.py` waits for the `tx_started` event
+before failing the sweep.
 
 ### 4) Plot Sweep Statistics
 
