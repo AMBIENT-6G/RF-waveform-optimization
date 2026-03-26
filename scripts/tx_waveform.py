@@ -152,7 +152,14 @@ def _read_npz_tx_gain_db(path: Path) -> float | None:
     return value
 
 
-def find_iq_file_for_tone_bw(iq_dir: Path, tone: int, bw_khz: int, gain_db: float | None = None) -> Path:
+def find_iq_file_for_tone_bw(
+    iq_dir: Path,
+    tone: int,
+    bw_khz: int,
+    gain_db: float | None = None,
+    *,
+    closest_gain_match: bool = False,
+) -> Path:
     if not iq_dir.exists():
         raise FileNotFoundError(f"IQ directory not found: {iq_dir.resolve()}")
 
@@ -185,12 +192,14 @@ def find_iq_file_for_tone_bw(iq_dir: Path, tone: int, bw_khz: int, gain_db: floa
 
     if gain_db is not None:
         matched_by_gain = []
+        gain_candidates = []
         for path in matches:
             tagged_gain = _parse_tx_gain_db_from_iq_name(path)
             if tagged_gain is None:
                 tagged_gain = _read_npz_tx_gain_db(path)
             if tagged_gain is None:
                 continue
+            gain_candidates.append((abs(tagged_gain - gain_db), tagged_gain, path))
             if math.isclose(tagged_gain, gain_db, rel_tol=0.0, abs_tol=1e-6):
                 matched_by_gain.append(path)
 
@@ -201,6 +210,9 @@ def find_iq_file_for_tone_bw(iq_dir: Path, tone: int, bw_khz: int, gain_db: floa
                 f"Multiple IQ files found for {_tone_label(tone)}, bw={bw_khz}kHz, gain={gain_db:g} dB: "
                 f"{[p.name for p in matched_by_gain]}"
             )
+        if closest_gain_match and gain_candidates:
+            gain_candidates.sort(key=lambda item: (item[0], item[1], item[2].name))
+            return gain_candidates[0][2].resolve()
 
     preferred = [path for path in matches if "_col0" in path.stem]
     if len(preferred) == 1:
@@ -378,6 +390,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--bw", required=True, type=int, help="Signal bandwidth in kHz (matches _BW<bw>)")
     parser.add_argument("--gain", required=True, type=float, help="TX gain in dB")
+    parser.add_argument(
+        "--closest-gain-match",
+        action="store_true",
+        help="For multitone files, use the closest tagged IQ gain when no exact gain-tagged file exists.",
+    )
     parser.add_argument("--duration", default=10.0, type=float, help="Approximate replay duration in seconds")
     parser.add_argument("--uhd-args", default=DEFAULT_UHD_ARGS, type=str, help="UHD device args string")
     return parser
@@ -392,7 +409,13 @@ def main() -> int:
     if args.duration <= 0:
         raise ValueError("--duration must be > 0")
 
-    iq_file = find_iq_file_for_tone_bw(IQ_DIR, args.tone, args.bw, args.gain)
+    iq_file = find_iq_file_for_tone_bw(
+        IQ_DIR,
+        args.tone,
+        args.bw,
+        args.gain,
+        closest_gain_match=args.closest_gain_match,
+    )
     iq, sample_rate_hz, center_freq_hz, avg_power, peak = load_iq_file(iq_file)
 
     print(f"Selected IQ file: {iq_file}")

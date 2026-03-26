@@ -4,6 +4,7 @@
 Default behavior:
 - tones: 0, 1, 4, 8, 16, 32 (0 = DC, 1 = NB)
 - gains: auto-discovered from gain-tagged IQ files when available
+- optional explicit gain sweeps require --gain-start, --gain-stop, and --gain-step together
 - launches ``tx_waveform.py`` for each tone/gain combination
 - waits 10 s before sampling the energy profiler
 - records profiler readings for 10 s
@@ -193,7 +194,14 @@ def discover_available_gains(iq_dir: Path, bandwidth_khz: int, tones: list[int])
     return [], "no gain-tagged multitone IQ files found"
 
 
-def resolve_iq_file_for_request(iq_dir: Path, tone: int, bandwidth_khz: int, gain_db: float) -> Path:
+def resolve_iq_file_for_request(
+    iq_dir: Path,
+    tone: int,
+    bandwidth_khz: int,
+    gain_db: float,
+    *,
+    closest_gain_match: bool = False,
+) -> Path:
     matches = waveform_glob(iq_dir, tone, bandwidth_khz)
     if not matches:
         raise FileNotFoundError(
@@ -221,6 +229,17 @@ def resolve_iq_file_for_request(iq_dir: Path, tone: int, bandwidth_khz: int, gai
             f"{[p.name for p in exact]}"
         )
 
+    if closest_gain_match:
+        tagged_matches = [
+            (abs(gain - gain_db), gain, path)
+            for path in matches
+            for gain in [parse_tx_gain_from_iq_name(path)]
+            if gain is not None
+        ]
+        if tagged_matches:
+            tagged_matches.sort(key=lambda item: (item[0], item[1], item[2].name))
+            return tagged_matches[0][2].resolve()
+
     if len(matches) == 1 and parse_tx_gain_from_iq_name(matches[0]) is None:
         return matches[0].resolve()
 
@@ -236,11 +255,24 @@ def resolve_iq_file_for_request(iq_dir: Path, tone: int, bandwidth_khz: int, gai
     )
 
 
-def build_sweep_plan(iq_dir: Path, bandwidth_khz: int, tones: list[int], gains: list[float]) -> list[dict[str, Any]]:
+def build_sweep_plan(
+    iq_dir: Path,
+    bandwidth_khz: int,
+    tones: list[int],
+    gains: list[float],
+    *,
+    closest_gain_match: bool = False,
+) -> list[dict[str, Any]]:
     plan = []
     for gain_db in gains:
         for tone in tones:
-            iq_file = resolve_iq_file_for_request(iq_dir, tone, bandwidth_khz, gain_db)
+            iq_file = resolve_iq_file_for_request(
+                iq_dir,
+                tone,
+                bandwidth_khz,
+                gain_db,
+                closest_gain_match=closest_gain_match,
+            )
             plan.append(
                 {
                     "tone": int(tone),
@@ -342,6 +374,8 @@ def launch_tx_process(
     bandwidth_khz: int,
     gain_db: float,
     duration_s: float,
+    *,
+    closest_gain_match: bool = False,
 ) -> subprocess.Popen[bytes]:
     command = [
         python_executable,
@@ -355,8 +389,38 @@ def launch_tx_process(
         "--duration",
         f"{duration_s:g}",
     ]
+    if closest_gain_match:
+        command.append("--closest-gain-match")
     print(f"Launching TX: {' '.join(command)}")
     return subprocess.Popen(command)
+
+
+def validate_gain_args(args: argparse.Namespace) -> tuple[bool, list[float] | None]:
+    provided = {
+        "gain_start": args.gain_start is not None,
+        "gain_stop": args.gain_stop is not None,
+        "gain_step": args.gain_step is not None,
+    }
+    if any(provided.values()) and not all(provided.values()):
+        missing = [
+            option
+            for option, is_present in (
+                ("--gain-start", provided["gain_start"]),
+                ("--gain-stop", provided["gain_stop"]),
+                ("--gain-step", provided["gain_step"]),
+            )
+            if not is_present
+        ]
+        raise ValueError(
+            "If any explicit gain sweep argument is provided, all of "
+            "--gain-start, --gain-stop, and --gain-step must be provided. "
+            f"Missing: {', '.join(missing)}"
+        )
+
+    if all(provided.values()):
+        return True, build_gain_values(args.gain_start, args.gain_stop, args.gain_step)
+
+    return False, None
 
 
 def wait_for_process(process: subprocess.Popen[bytes]) -> int:
@@ -369,14 +433,28 @@ def run_sweep(args: argparse.Namespace) -> int:
     if not IQ_DIR.exists():
         raise FileNotFoundError(f"IQ directory not found: {IQ_DIR.resolve()}")
 
-    auto_gains, gain_source = discover_available_gains(IQ_DIR, args.bw, args.tones)
-    if auto_gains:
-        gains = auto_gains
-    else:
-        gains = build_gain_values(args.gain_start, args.gain_stop, args.gain_step)
+    explicit_gain_range, explicit_gains = validate_gain_args(args)
+    if explicit_gain_range:
+        gains = explicit_gains or []
         gain_source = "explicit gain range"
+        closest_gain_match = True
+    else:
+        auto_gains, gain_source = discover_available_gains(IQ_DIR, args.bw, args.tones)
+        if not auto_gains:
+            raise RuntimeError(
+                "No shared gain-tagged multitone IQ files were found for the requested tones and bandwidth. "
+                "Provide --gain-start, --gain-stop, and --gain-step to run an explicit gain sweep."
+            )
+        gains = auto_gains
+        closest_gain_match = False
 
-    sweep_plan = build_sweep_plan(IQ_DIR, args.bw, args.tones, gains)
+    sweep_plan = build_sweep_plan(
+        IQ_DIR,
+        args.bw,
+        args.tones,
+        gains,
+        closest_gain_match=closest_gain_match,
+    )
     completed_sweeps = 0
 
     try:
@@ -404,6 +482,7 @@ def run_sweep(args: argparse.Namespace) -> int:
                 bandwidth_khz=args.bw,
                 gain_db=gain,
                 duration_s=args.tx_duration,
+                closest_gain_match=closest_gain_match,
             )
 
             started_at = utc_now_iso()
@@ -469,20 +548,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gain-start",
         type=float,
-        default=50.0,
-        help="Fallback start gain in dB if gain-tagged IQ files are absent (default: 50)",
+        default=None,
+        help="Optional explicit sweep start gain in dB. Must be provided together with --gain-stop and --gain-step.",
     )
     parser.add_argument(
         "--gain-stop",
         type=float,
-        default=85.0,
-        help="Fallback stop gain in dB, inclusive, if gain-tagged IQ files are absent (default: 85)",
+        default=None,
+        help="Optional explicit sweep stop gain in dB, inclusive. Must be provided together with --gain-start and --gain-step.",
     )
     parser.add_argument(
         "--gain-step",
         type=float,
-        default=0.2,
-        help="Fallback gain step in dB if gain-tagged IQ files are absent (default: 0.2)",
+        default=None,
+        help="Optional explicit sweep gain step in dB. Must be provided together with --gain-start and --gain-stop.",
     )
     parser.add_argument("--tx-duration", type=float, default=20.0, help="TX duration in seconds (default: 20)")
     parser.add_argument(

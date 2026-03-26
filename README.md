@@ -140,8 +140,17 @@ for each gain:
 - `N=16`
 - `N=32`
 
-If gain-tagged multitone IQ files are absent, it falls back to
-`--gain-start`, `--gain-stop`, and `--gain-step`.
+In this auto-discovery mode, multitone sweeps use the exact shared tagged gains
+present in `data/tx_iq/`.
+
+If you want an explicit gain sweep, provide `--gain-start`, `--gain-stop`, and
+`--gain-step` together. In that mode:
+- all three gain arguments are required as a group
+- `tone=0` and `tone=1` still use their single DC/NB IQ files
+- `tone>=2` uses the closest gain-tagged `iq_N*_BW*_TXG*db.npz` file for each requested gain
+
+Example: requesting `--gain-start 80 --gain-stop 80 --gain-step 1` for `tone=32`
+will use `iq_N32_BW1000_TXG80.2db.npz` when that is the nearest tagged file.
 
 ### 4) Plot Sweep Statistics
 
@@ -195,6 +204,8 @@ python3 scripts/tx_waveform.py --tone 0 --bw 1000 --gain 80.2 --duration 20
 
 This reads IQ files from `data/tx_iq/`.
 - For multitone files, `--gain` selects the matching `iq_N*_BW*_TXG*db.npz`.
+- Use `--closest-gain-match` to allow the nearest tagged multitone IQ file when no exact tagged gain exists.
+  Example: `--tone 32 --bw 1000 --gain 80.0 --closest-gain-match` can select `iq_N32_BW1000_TXG80.2db.npz`.
 - For `tone=0` and `tone=1`, the same configured gain is still applied on the USRP even though the file itself is not gain-tagged.
 
 ## Make Targets
