@@ -24,7 +24,9 @@ MEASUREMENT_STEM_SUFFIX = "meas-tones-power"
 MEASUREMENT_TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REFERENCE_CSV = REPO_ROOT / "data" / "reference" / "harvester-chart-data.csv"
+EXPECTED_EFFICIENCY_CSV = REPO_ROOT / "data" / "reference" / "expected-efficiency.csv"
 DEFAULT_GAIN_MAP_CSV = REPO_ROOT / "data" / "gain-power-map.csv"
+WEIGHTS_DIR = REPO_ROOT / "data" / "weights"
 LEGACY_RF_CALIBRATION_REGEX = re.compile(r".*tone_gain_prf\.csv$", re.IGNORECASE)
 
 
@@ -434,6 +436,26 @@ def extract_waveform_labels(records: list[dict[str, Any]]) -> dict[int, str]:
     return labels
 
 
+def extract_bandwidths(records: list[dict[str, Any]]) -> dict[int, int]:
+    bandwidths: dict[int, int] = {}
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+
+        tone = record.get("tone")
+        bw_khz = record.get("bw_khz")
+        try:
+            tone_int = int(tone)
+            bw_int = int(float(bw_khz))
+        except (TypeError, ValueError):
+            continue
+
+        bandwidths.setdefault(tone_int, bw_int)
+
+    return bandwidths
+
+
 def parse_key_pair(key: str) -> tuple[int, float]:
     cleaned = key.strip().strip("()")
     parts = [item.strip() for item in cleaned.split(",")]
@@ -571,6 +593,133 @@ def load_reference_efficiency(path: Path) -> tuple[np.ndarray, np.ndarray] | Non
     return level[order], efficiency[order]
 
 
+def resolve_weights_file(tone: int, bw_khz: int | None) -> Path | None:
+    if tone < 2:
+        return None
+
+    if bw_khz is not None:
+        candidate = WEIGHTS_DIR / f"weightsN{tone}BW{bw_khz}.mat"
+        if candidate.exists():
+            return candidate
+
+    matches = sorted(WEIGHTS_DIR.glob(f"weightsN{tone}BW*.mat"))
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def load_expected_efficiency_from_mat(path: Path) -> tuple[np.ndarray, np.ndarray] | None:
+    if not path.exists():
+        return None
+
+    try:
+        import h5py
+    except Exception:
+        return None
+
+    try:
+        with h5py.File(path, "r") as handle:
+            required = {"Pdc", "inPwrVec"}
+            if not required.issubset(handle.keys()):
+                return None
+
+            pdc = np.atleast_1d(np.asarray(handle["Pdc"][()], dtype=float).squeeze())
+            input_power_mw = np.atleast_1d(np.asarray(handle["inPwrVec"][()], dtype=float).squeeze())
+    except Exception:
+        return None
+
+    return compute_expected_efficiency(input_power_mw=input_power_mw, output_power_mw=pdc)
+
+
+def compute_expected_efficiency(
+    input_power_mw: np.ndarray,
+    output_power_mw: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    if output_power_mw.size != input_power_mw.size:
+        return None
+
+    input_power_dbm = np.full(input_power_mw.shape, np.nan, dtype=float)
+    positive = input_power_mw > 0
+    input_power_dbm[positive] = 10.0 * np.log10(input_power_mw[positive])
+    efficiency_pct = np.divide(
+        output_power_mw,
+        input_power_mw,
+        out=np.full_like(output_power_mw, np.nan, dtype=float),
+        where=input_power_mw > 0,
+    ) * 100.0
+
+    valid = np.isfinite(input_power_dbm) & np.isfinite(efficiency_pct)
+    if not np.any(valid):
+        return None
+
+    input_power_dbm = input_power_dbm[valid]
+    efficiency_pct = efficiency_pct[valid]
+    order = np.argsort(input_power_dbm)
+    return input_power_dbm[order], efficiency_pct[order]
+
+
+def load_expected_efficiency_from_csv(
+    path: Path,
+    tone: int,
+    bw_khz: int | None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    if not path.exists():
+        return None
+
+    try:
+        data = np.genfromtxt(path, delimiter=",", names=True, dtype=None, encoding="utf-8")
+    except Exception:
+        return None
+
+    if data.size == 0:
+        return None
+
+    names = tuple(data.dtype.names or ())
+    required = {"tone", "bw_khz", "level_dbm", "efficiency"}
+    if not required.issubset(names):
+        return None
+
+    tones = np.atleast_1d(np.asarray(data["tone"], dtype=int))
+    bandwidths = np.atleast_1d(np.asarray(data["bw_khz"], dtype=int))
+    levels = np.atleast_1d(np.asarray(data["level_dbm"], dtype=float))
+    efficiencies = np.atleast_1d(np.asarray(data["efficiency"], dtype=float))
+
+    mask = tones == int(tone)
+    if bw_khz is not None:
+        mask &= bandwidths == int(bw_khz)
+    elif np.any(mask):
+        unique_bandwidths = np.unique(bandwidths[mask])
+        if unique_bandwidths.size == 1:
+            mask &= bandwidths == int(unique_bandwidths[0])
+
+    if not np.any(mask):
+        return None
+
+    levels = levels[mask]
+    efficiencies = efficiencies[mask]
+    valid = np.isfinite(levels) & np.isfinite(efficiencies)
+    if not np.any(valid):
+        return None
+
+    levels = levels[valid]
+    efficiencies = efficiencies[valid]
+    order = np.argsort(levels)
+    return levels[order], efficiencies[order]
+
+
+def load_expected_efficiency(
+    tone: int,
+    bw_khz: int | None,
+    weights_path: Path | None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    if weights_path is not None:
+        expected = load_expected_efficiency_from_mat(weights_path)
+        if expected is not None:
+            return expected
+
+    return load_expected_efficiency_from_csv(EXPECTED_EFFICIENCY_CSV, tone=tone, bw_khz=bw_khz)
+
+
 def plot_series(
     series: dict[int, dict[str, Any]],
     percentiles: tuple[float, float],
@@ -682,6 +831,7 @@ def plot_efficiency_markers(
     power_key: str,
     output: Path | None,
     input_power_dbm_by_tone: dict[int, np.ndarray] | None = None,
+    bandwidth_khz_by_tone: dict[int, int] | None = None,
     use_calibrated_input: bool = False,
 ):
     if not series:
@@ -692,8 +842,9 @@ def plot_efficiency_markers(
 
     plt, fig, axis = make_axes()
     color_map = plt.get_cmap("tab10")
-    label_a = f"P{percentiles[0]:g}"
-    label_b = f"P{percentiles[1]:g}"
+    _ = percentiles
+    plotted_expected = False
+    plotted_measured = False
 
     for index, tone in enumerate(sorted(series)):
         tone_series = series[tone]
@@ -704,69 +855,68 @@ def plot_efficiency_markers(
             input_power_dbm = gain_to_input_power_dbm(tone_series["gains"])
         input_power_w = dbm_to_watts(input_power_dbm)
         output_power_w = pw_to_watts(tone_series["mean"])
-        percentile_a_power_w = pw_to_watts(tone_series[f"p{percentiles[0]:g}"])
-        percentile_b_power_w = pw_to_watts(tone_series[f"p{percentiles[1]:g}"])
         efficiency_pct = np.divide(
             output_power_w,
             input_power_w,
             out=np.full_like(output_power_w, np.nan, dtype=float),
             where=input_power_w > 0,
         ) * 100.0
-        percentile_a_efficiency_pct = np.divide(
-            percentile_a_power_w,
-            input_power_w,
-            out=np.full_like(percentile_a_power_w, np.nan, dtype=float),
-            where=input_power_w > 0,
-        ) * 100.0
-        percentile_b_efficiency_pct = np.divide(
-            percentile_b_power_w,
-            input_power_w,
-            out=np.full_like(percentile_b_power_w, np.nan, dtype=float),
-            where=input_power_w > 0,
-        ) * 100.0
-        valid = (
-            np.isfinite(input_power_dbm)
-            & np.isfinite(efficiency_pct)
-            & np.isfinite(percentile_a_efficiency_pct)
-            & np.isfinite(percentile_b_efficiency_pct)
-        )
+        valid = np.isfinite(input_power_dbm) & np.isfinite(efficiency_pct)
         if not np.any(valid):
             print(f"Warning: skipping {waveform_label} in efficiency plot (no valid input-power points).")
             continue
         input_power_dbm = input_power_dbm[valid]
         efficiency_pct = efficiency_pct[valid]
-        percentile_a_efficiency_pct = percentile_a_efficiency_pct[valid]
-        percentile_b_efficiency_pct = percentile_b_efficiency_pct[valid]
         order = np.argsort(input_power_dbm)
         input_power_dbm = input_power_dbm[order]
         efficiency_pct = efficiency_pct[order]
-        percentile_a_efficiency_pct = percentile_a_efficiency_pct[order]
-        percentile_b_efficiency_pct = percentile_b_efficiency_pct[order]
         color = color_map(index % color_map.N)
         axis.plot(
             input_power_dbm,
             efficiency_pct,
             color=color,
-            linewidth=1.5,
-            linestyle="-",
+            linestyle="--",
+            linewidth=1.0,
+            alpha=0.8,
+            zorder=2,
+        )
+        axis.scatter(
+            input_power_dbm,
+            efficiency_pct,
+            facecolors="none",
+            edgecolors=color,
+            marker="o",
+            linewidths=1.5,
             label=waveform_label,
+            zorder=3,
         )
-        axis.fill_between(
-            input_power_dbm,
-            np.minimum(percentile_a_efficiency_pct, efficiency_pct),
-            np.maximum(percentile_a_efficiency_pct, efficiency_pct),
+        plotted_measured = True
+
+        weights_path = resolve_weights_file(
+            tone,
+            None if bandwidth_khz_by_tone is None else bandwidth_khz_by_tone.get(tone),
+        )
+        expected = load_expected_efficiency(
+            tone=tone,
+            bw_khz=None if bandwidth_khz_by_tone is None else bandwidth_khz_by_tone.get(tone),
+            weights_path=weights_path,
+        )
+        if expected is None:
+            source_hint = str(weights_path) if weights_path is not None else str(EXPECTED_EFFICIENCY_CSV)
+            print(f"Warning: could not load expected efficiency for {waveform_label} from {source_hint}")
+            continue
+
+        expected_input_dbm, expected_efficiency_pct = expected
+        axis.scatter(
+            expected_input_dbm,
+            expected_efficiency_pct,
+            marker="x",
             color=color,
-            alpha=0.5,
-            linewidth=0,
+            linewidths=2.5,
+            s=90,
+            zorder=4,
         )
-        axis.fill_between(
-            input_power_dbm,
-            np.minimum(efficiency_pct, percentile_b_efficiency_pct),
-            np.maximum(efficiency_pct, percentile_b_efficiency_pct),
-            color=color,
-            alpha=0.5,
-            linewidth=0,
-        )
+        plotted_expected = True
 
     reference = load_reference_efficiency(REFERENCE_CSV)
     if reference is not None:
@@ -777,8 +927,23 @@ def plot_efficiency_markers(
             color="black",
             linestyle="--",
             linewidth=2,
-            label="Measured",
+            label="Narrowband ref",
             zorder=5,
+        )
+    if plotted_expected:
+        axis.plot(
+            [],
+            [],
+            color="black",
+            marker="x",
+            linestyle="None",
+            markeredgewidth=2,
+            label="Expected",
+        )
+    else:
+        print(
+            "Warning: no expected efficiency overlays were plotted. "
+            f"Checked MAT weights under {WEIGHTS_DIR} and CSV fallback {EXPECTED_EFFICIENCY_CSV}."
         )
 
     title_prefix = "calibrated" if use_calibrated_input else "inferred"
@@ -786,7 +951,12 @@ def plot_efficiency_markers(
     axis.set_xlabel("Input RF power Pin (dBm)")
     axis.set_ylabel("Efficiency Pout/Pin (%)")
     axis.grid(True, alpha=0.3)
-    axis.legend(title=f"Line: Average | Fill: {label_a}/{label_b}")
+    legend_title = "o: Measured"
+    if plotted_expected:
+        legend_title += " | x: Expected"
+    if not plotted_measured:
+        legend_title = "x: Expected" if plotted_expected else "Waveform"
+    axis.legend(title=legend_title)
     fig.tight_layout()
     save_figure(fig, output)
     return plt, fig
@@ -957,6 +1127,7 @@ def main() -> int:
         print(f"Processing {input_path}")
         records = load_records(input_path)
         waveform_labels = extract_waveform_labels(records)
+        bandwidth_khz_by_tone = extract_bandwidths(records)
         grouped = group_power_by_tone_gain(records, power_key=args.power_key)
         series = build_series(grouped, percentiles=args.percentiles, waveform_labels=waveform_labels)
         input_power_dbm_by_tone, used_calibration = build_input_power_lookup(
@@ -981,6 +1152,7 @@ def main() -> int:
             power_key=args.power_key,
             output=efficiency_output_path(output_path),
             input_power_dbm_by_tone=input_power_dbm_by_tone,
+            bandwidth_khz_by_tone=bandwidth_khz_by_tone,
             use_calibrated_input=used_calibration,
         )
         _, input_output_fig = plot_input_output_mw_markers(
