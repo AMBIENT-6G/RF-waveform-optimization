@@ -248,8 +248,9 @@ def build_input_power_lookup(
         if matched < gains.size:
             print(
                 f"Warning: {waveform_label} missing {gains.size - matched} calibrated gain point(s); "
-                "dropping those points from input-power plots."
+                "using inferred Pin = gain - 80 dBm for those points."
             )
+            calibrated = np.where(np.isfinite(calibrated), calibrated, inferred)
 
         input_power_dbm_by_tone[tone] = calibrated
         used_calibration = True
@@ -554,6 +555,75 @@ def build_series(
     return series
 
 
+def build_stability_series(
+    records: list[dict[str, Any]],
+    power_key: str,
+    waveform_labels: dict[int, str] | None = None,
+) -> dict[int, dict[str, Any]]:
+    grouped: dict[int, list[tuple[float, float, int]]] = defaultdict(list)
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+
+        tone = record.get("tone")
+        gain = record.get("gain_db")
+        readings = record.get("readings", [])
+        if tone is None or gain is None or not isinstance(readings, list):
+            continue
+
+        values = []
+        for reading in readings:
+            if not isinstance(reading, dict):
+                continue
+            value = reading.get(power_key)
+            if value is None:
+                continue
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(numeric_value):
+                values.append(numeric_value)
+
+        if not values:
+            continue
+
+        window_values = np.asarray(values, dtype=float)
+        mean_value = float(np.mean(window_values))
+        normalized_std_pct = (
+            float(np.std(window_values) / abs(mean_value) * 100.0)
+            if mean_value != 0.0 and np.isfinite(mean_value)
+            else float("nan")
+        )
+        grouped[int(tone)].append(
+            (
+                float(gain),
+                normalized_std_pct,
+                int(window_values.size),
+            )
+        )
+
+    series: dict[int, dict[str, Any]] = {}
+    for tone, entries in sorted(grouped.items()):
+        gains = np.asarray([entry[0] for entry in entries], dtype=float)
+        normalized_std_pct = np.asarray([entry[1] for entry in entries], dtype=float)
+        sample_counts = np.asarray([entry[2] for entry in entries], dtype=int)
+
+        series[tone] = {
+            "label": (
+                waveform_labels.get(tone, waveform_label_for_tone(tone))
+                if waveform_labels is not None
+                else waveform_label_for_tone(tone)
+            ),
+            "gains": gains,
+            "normalized_std_pct": normalized_std_pct,
+            "sample_counts": sample_counts,
+        }
+
+    return series
+
+
 def get_pyplot():
     try:
         import matplotlib.pyplot as plt
@@ -603,6 +673,28 @@ def buffer_voltage_output_path(output: Path | None) -> Path | None:
     if output is None:
         return None
     return output.with_name(f"{output.stem}_buffer_voltage{output.suffix}")
+
+
+def power_stability_output_path(output: Path | None) -> Path | None:
+    if output is None:
+        return None
+    return output.with_name(f"{output.stem}_power_stability{output.suffix}")
+
+
+def choose_power_unit_from_pw(values_pw: np.ndarray) -> tuple[float, str]:
+    finite = np.asarray(values_pw, dtype=float)
+    finite = np.abs(finite[np.isfinite(finite)])
+    if finite.size == 0:
+        return 1.0, "pW"
+
+    max_value = float(np.max(finite))
+    if max_value >= 1e12:
+        return 1e-12, "W"
+    if max_value >= 1e9:
+        return 1e-9, "mW"
+    if max_value >= 1e6:
+        return 1e-6, "uW"
+    return 1.0, "pW"
 
 
 def load_reference_efficiency(path: Path) -> tuple[np.ndarray, np.ndarray] | None:
@@ -1124,6 +1216,61 @@ def plot_buffer_voltage_minmax_avg(
     return plt, fig
 
 
+def plot_power_stability(
+    series: dict[int, dict[str, Any]],
+    power_key: str,
+    output: Path | None,
+):
+    if not series:
+        print(f"Skipping power stability plot: no usable {power_key!r} readings found.")
+        return None, None
+
+    plt, fig, axis = make_axes()
+    color_map = plt.get_cmap("tab10")
+    plot_items = []
+
+    for index, tone in enumerate(sorted(series)):
+        tone_series = series[tone]
+        normalized_std_pct = np.asarray(tone_series["normalized_std_pct"], dtype=float)
+        sample_counts = np.asarray(tone_series["sample_counts"], dtype=int)
+        valid = np.isfinite(normalized_std_pct) & (sample_counts >= 2)
+        if not np.any(valid):
+            continue
+
+        sorted_normalized_std_pct = np.sort(normalized_std_pct[valid])
+        cdf = np.arange(1, sorted_normalized_std_pct.size + 1, dtype=float) / float(sorted_normalized_std_pct.size)
+
+        waveform_label = str(tone_series.get("label", waveform_label_for_tone(tone)))
+        plot_items.append((index, sorted_normalized_std_pct, cdf, waveform_label))
+
+    if not plot_items:
+        print(f"Skipping power stability plot: no finite {power_key!r} stability values found.")
+        return plt, fig
+
+    for index, sorted_normalized_std_pct, cdf, waveform_label in plot_items:
+        color = color_map(index % color_map.N)
+        axis.step(
+            sorted_normalized_std_pct,
+            cdf,
+            where="post",
+            color=color,
+            linewidth=2,
+            label=f"{waveform_label} (n={sorted_normalized_std_pct.size})",
+        )
+
+    title_prefix = "EP power" if power_key == "pwr_pw" else power_key
+    fig.suptitle(f"CDF of {title_prefix} std/mean within one measurement window")
+    axis.set_xlabel("Per-measurement std/mean (%)")
+    axis.set_ylabel("CDF")
+    axis.set_ylim(0.0, 1.02)
+    axis.ticklabel_format(axis="x", style="plain", useOffset=False)
+    axis.grid(True, alpha=0.3)
+    axis.legend(title="Waveform")
+    fig.tight_layout()
+    save_figure(fig, output)
+    return plt, fig
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Plot power statistics versus configured gain for each waveform")
     parser.add_argument(
@@ -1257,6 +1404,11 @@ def main() -> int:
             percentiles=args.percentiles,
             waveform_labels=waveform_labels,
         )
+        stability_series = build_stability_series(
+            records,
+            power_key=args.power_key,
+            waveform_labels=waveform_labels,
+        )
         input_power_dbm_by_tone, used_calibration = build_input_power_lookup(
             series,
             rf_calibration=rf_calibration,
@@ -1293,6 +1445,11 @@ def main() -> int:
             voltage_series,
             output=buffer_voltage_output_path(output_path),
         )
+        _, power_stability_fig = plot_power_stability(
+            stability_series,
+            power_key=args.power_key,
+            output=power_stability_output_path(output_path),
+        )
         all_figures.append(band_fig)
         all_figures.append(marker_fig)
         if efficiency_fig is not None:
@@ -1301,6 +1458,8 @@ def main() -> int:
             all_figures.append(input_output_fig)
         if buffer_voltage_fig is not None:
             all_figures.append(buffer_voltage_fig)
+        if power_stability_fig is not None:
+            all_figures.append(power_stability_fig)
 
         manifest_path = write_manifest(
             results_dir=results_dir,
@@ -1308,12 +1467,14 @@ def main() -> int:
             script_name=Path(__file__).name,
             argv=sys.argv[1:],
             extra={
+                
                 "input": str(input_path),
                 "output": str(output_path),
                 "rf_calibration_csv": (
                     str(rf_calibration_path) if rf_calibration_path is not None else None
                 ),
                 "buffer_voltage_output": str(buffer_voltage_output_path(output_path)),
+                "power_stability_output": str(power_stability_output_path(output_path)),
             },
         )
         print(f"Updated run manifest: {manifest_path}")

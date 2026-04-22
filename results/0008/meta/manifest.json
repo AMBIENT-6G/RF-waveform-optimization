@@ -25,6 +25,93 @@
         "output": "/home/pi/RF-waveform-optimization/results/0008/raw/meas-tones-power.jsonl",
         "log_file": "/home/pi/RF-waveform-optimization/results/0008/measure_ep_power.log"
       }
+    },
+    {
+      "timestamp_utc": "2026-04-22T14:51:00+00:00",
+      "script": "plot_power_stats.py",
+      "argv": [
+        "--run-id",
+        "0008"
+      ],
+      "extra": {
+        "input": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\raw\\meas-tones-power.jsonl",
+        "output": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\plots\\meas-tones-power.png",
+        "rf_calibration_csv": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\data\\gain-power-map.csv",
+        "buffer_voltage_output": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\plots\\meas-tones-power_buffer_voltage.png"
+      }
+    },
+    {
+      "timestamp_utc": "2026-04-22T14:52:52+00:00",
+      "script": "plot_power_stats.py",
+      "argv": [
+        "--run-id",
+        "0008"
+      ],
+      "extra": {
+        "input": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\raw\\meas-tones-power.jsonl",
+        "output": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\plots\\meas-tones-power.png",
+        "rf_calibration_csv": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\data\\gain-power-map.csv",
+        "buffer_voltage_output": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\plots\\meas-tones-power_buffer_voltage.png"
+      }
+    },
+    {
+      "timestamp_utc": "2026-04-22T14:55:37+00:00",
+      "script": "plot_power_stats.py",
+      "argv": [
+        "--run-id",
+        "0008"
+      ],
+      "extra": {
+        "input": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\raw\\meas-tones-power.jsonl",
+        "output": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\plots\\meas-tones-power.png",
+        "rf_calibration_csv": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\data\\gain-power-map.csv",
+        "buffer_voltage_output": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\plots\\meas-tones-power_buffer_voltage.png"
+      }
+    },
+    {
+      "timestamp_utc": "2026-04-22T15:01:56+00:00",
+      "script": "plot_power_stats.py",
+      "argv": [
+        "--run-id",
+        "0008"
+      ],
+      "extra": {
+        "input": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\raw\\meas-tones-power.jsonl",
+        "output": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\plots\\meas-tones-power.png",
+        "rf_calibration_csv": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\data\\gain-power-map.csv",
+        "buffer_voltage_output": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\plots\\meas-tones-power_buffer_voltage.png",
+        "power_stability_output": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\plots\\meas-tones-power_power_stability.png"
+      }
+    },
+    {
+      "timestamp_utc": "2026-04-22T15:05:04+00:00",
+      "script": "plot_power_stats.py",
+      "argv": [
+        "--run-id",
+        "0008"
+      ],
+      "extra": {
+        "input": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\raw\\meas-tones-power.jsonl",
+        "output": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\plots\\meas-tones-power.png",
+        "rf_calibration_csv": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\data\\gain-power-map.csv",
+        "buffer_voltage_output": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\plots\\meas-tones-power_buffer_voltage.png",
+        "power_stability_output": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\plots\\meas-tones-power_power_stability.png"
+      }
+    },
+    {
+      "timestamp_utc": "2026-04-22T15:06:04+00:00",
+      "script": "plot_power_stats.py",
+      "argv": [
+        "--run-id",
+        "0008"
+      ],
+      "extra": {
+        "input": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\raw\\meas-tones-power.jsonl",
+        "output": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\plots\\meas-tones-power.png",
+        "rf_calibration_csv": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\data\\gain-power-map.csv",
+        "buffer_voltage_output": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\plots\\meas-tones-power_buffer_voltage.png",
+        "power_stability_output": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\0008\\plots\\meas-tones-power_power_stability.png"
+      }
     }
   ],
   "run_id": "0008"
