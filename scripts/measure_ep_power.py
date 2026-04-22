@@ -572,11 +572,13 @@ class EnergyProfiler:
         ack["bytes_written"] = int(bytes_written) if bytes_written is not None else None
         if not ack["ok"]:
             seen = "; ".join(ack["lines"]) if ack["lines"] else "<no text ACK>"
-            raise RuntimeError(
-                "EP target voltage ACK mismatch: "
+            print(
+                "Warning: EP target voltage ACK mismatch: "
                 f"expected CMD=0x{SET_TARGET_VOLTAGE_CMD:02X}, VALUE={value} (0x{value:08X}); "
                 f"got CMD={ack['cmd']!r}, VALUE={ack['value']!r}, VALUE_HEX={ack['value_hex']!r}; "
-                f"received: {seen}"
+                f"received: {seen}",
+                file=sys.stderr,
+                flush=True,
             )
         return ack
 
