@@ -16,6 +16,7 @@ Default behavior:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -24,11 +25,12 @@ import shutil
 import struct
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import serial
 import zmq
@@ -48,6 +50,48 @@ TX_NOTIFY_POLL_TIMEOUT_MS = 50
 TX_DONE_TRIM_SAMPLES = 10
 EP_SERIAL_POLL_TIMEOUT_S = 0.05
 DEFAULT_TX_START_TIMEOUT_S = 60.0
+SET_TARGET_VOLTAGE_CMD = 0x02
+SET_TARGET_VOLTAGE_VALUE_SIZE = 0x04
+DEFAULT_TARGET_VOLTAGE_ACK_TIMEOUT_S = 2.0
+EP_ACK_CMD_RE = re.compile(r"CMD\s*=\s*0x(?P<cmd>[0-9A-Fa-f]{1,2})")
+EP_ACK_VALUE_RE = re.compile(
+    r"VALUE\s*=\s*(?P<value>\d+)\s*\(0x(?P<value_hex>[0-9A-Fa-f]{1,8})\)"
+)
+
+
+class TeeTextIO:
+    def __init__(self, *streams: TextIO) -> None:
+        self.streams = streams
+
+    def write(self, text: str) -> int:
+        for stream in self.streams:
+            stream.write(text)
+            stream.flush()
+        return len(text)
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            stream.flush()
+
+
+def resolve_run_log_path(
+    explicit_log: Path | None,
+    *,
+    results_dir: Path,
+    run_id: str,
+) -> Path:
+    run_dir = results_dir / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    if explicit_log is None:
+        target = run_dir / "measure_ep_power.log"
+    elif explicit_log.is_absolute():
+        target = explicit_log
+    else:
+        target = run_dir / explicit_log
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
 
 
 def xor_checksum(data: bytes) -> int:
@@ -425,17 +469,104 @@ class EnergyProfiler:
             "pot_val": raw_values[3],
         }
 
-    def set_target_voltage(self, value: int) -> None:
+    def _read_target_voltage_ack(
+        self,
+        *,
+        expected_cmd: int,
+        expected_value: int,
+        timeout_s: float,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout_s
+        original_timeout = self.serial_port.timeout
+        short_timeout = 0.1 if original_timeout is None else min(float(original_timeout), 0.1)
+        self.serial_port.timeout = short_timeout
+
+        text = ""
+        lines: list[str] = []
+        ack_cmd: int | None = None
+        ack_value: int | None = None
+        ack_value_hex: int | None = None
+
+        try:
+            while time.monotonic() < deadline:
+                waiting = getattr(self.serial_port, "in_waiting", 0)
+                raw = self.serial_port.read(max(1, waiting))
+                if not raw:
+                    continue
+
+                decoded = raw.decode("utf-8", errors="ignore")
+                if not decoded:
+                    continue
+
+                text += decoded
+                while "\n" in text:
+                    line, text = text.split("\n", 1)
+                    clean = line.strip()
+                    if clean:
+                        lines.append(clean)
+
+                search_text = "\n".join([*lines, text])
+                if ack_cmd is None:
+                    cmd_match = EP_ACK_CMD_RE.search(search_text)
+                    if cmd_match:
+                        ack_cmd = int(cmd_match.group("cmd"), 16)
+
+                if ack_value is None or ack_value_hex is None:
+                    value_match = EP_ACK_VALUE_RE.search(search_text)
+                    if value_match:
+                        ack_value = int(value_match.group("value"), 10)
+                        ack_value_hex = int(value_match.group("value_hex"), 16)
+
+                if ack_cmd is not None and ack_value is not None and ack_value_hex is not None:
+                    break
+        finally:
+            self.serial_port.timeout = original_timeout
+
+        if text.strip():
+            lines.append(text.strip())
+
+        ack = {
+            "expected_cmd": int(expected_cmd),
+            "expected_value": int(expected_value),
+            "cmd": ack_cmd,
+            "value": ack_value,
+            "value_hex": ack_value_hex,
+            "lines": lines,
+        }
+        ack["ok"] = (
+            ack_cmd == expected_cmd
+            and ack_value == expected_value
+            and ack_value_hex == expected_value
+        )
+        return ack
+
+    def set_target_voltage(self, value: int, *, ack_timeout_s: float) -> dict[str, Any]:
         command = bytearray()
         command.append(START_BYTE)
-        command.append(0x02)
-        command.append(0x04)
+        command.append(SET_TARGET_VOLTAGE_CMD)
+        command.append(SET_TARGET_VOLTAGE_VALUE_SIZE)
         command += struct.pack(">I", value)
         command.append(0xFF)
 
         time.sleep(0.1)
+        self.serial_port.reset_input_buffer()
         self.serial_port.write(command)
         self.serial_port.flush()
+
+        ack = self._read_target_voltage_ack(
+            expected_cmd=SET_TARGET_VOLTAGE_CMD,
+            expected_value=value,
+            timeout_s=ack_timeout_s,
+        )
+        if not ack["ok"]:
+            seen = "; ".join(ack["lines"]) if ack["lines"] else "<no text ACK>"
+            raise RuntimeError(
+                "EP target voltage ACK mismatch: "
+                f"expected CMD=0x{SET_TARGET_VOLTAGE_CMD:02X}, VALUE={value} (0x{value:08X}); "
+                f"got CMD={ack['cmd']!r}, VALUE={ack['value']!r}, VALUE_HEX={ack['value_hex']!r}; "
+                f"received: {seen}"
+            )
+        return ack
 
 
 def collect_measurements_until_stop(
@@ -530,7 +661,7 @@ def launch_tx_process(
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     print(f"Launching TX: {' '.join(command)}", flush=True)
-    return subprocess.Popen(command, env=env)
+    return subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
 def validate_gain_args(args: argparse.Namespace) -> tuple[bool, list[float] | None]:
@@ -565,6 +696,32 @@ def wait_for_process(process: subprocess.Popen[bytes]) -> int:
     return process.wait()
 
 
+def stream_process_output(
+    process: subprocess.Popen[bytes],
+    *,
+    prefix: str,
+) -> threading.Thread | None:
+    if process.stdout is None:
+        return None
+
+    def worker() -> None:
+        assert process.stdout is not None
+        for raw_line in iter(process.stdout.readline, b""):
+            text = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+            if text:
+                print(f"{prefix}{text}", flush=True)
+        process.stdout.close()
+
+    thread = threading.Thread(target=worker, name=f"{prefix.strip()} output", daemon=True)
+    thread.start()
+    return thread
+
+
+def join_process_output_thread(thread: threading.Thread | None) -> None:
+    if thread is not None:
+        thread.join(timeout=2.0)
+
+
 def run_sweep(args: argparse.Namespace) -> int:
     profiler = EnergyProfiler(args.port, args.baudrate, args.serial_timeout)
     zmq_context = zmq.Context()
@@ -597,9 +754,19 @@ def run_sweep(args: argparse.Namespace) -> int:
     completed_sweeps = 0
 
     try:
+        target_voltage_ack = None
         if args.target_voltage is not None:
-            profiler.set_target_voltage(args.target_voltage)
-            print(f"Set EP target voltage to {args.target_voltage} mV")
+            target_voltage_ack = profiler.set_target_voltage(
+                args.target_voltage,
+                ack_timeout_s=args.target_voltage_ack_timeout,
+            )
+            for ack_line in target_voltage_ack["lines"]:
+                print(f"EP ACK: {ack_line}")
+            print(
+                "Set EP target voltage to "
+                f"{args.target_voltage} mV; ACK CMD=0x{target_voltage_ack['cmd']:02X}, "
+                f"VALUE={target_voltage_ack['value']} (0x{target_voltage_ack['value_hex']:08X})"
+            )
 
         print(f"Using {len(gains)} gain value(s): {gains}")
         print(f"Gain source: {gain_source}")
@@ -620,6 +787,8 @@ def run_sweep(args: argparse.Namespace) -> int:
             print(
                 f"Starting sweep: {entry['waveform_label']}, gain={gain:g} dB, iq_file={Path(entry['iq_file']).name}"
             )
+            process: subprocess.Popen[bytes] | None = None
+            tx_output_thread: threading.Thread | None = None
             try:
                 process = launch_tx_process(
                     python_executable=args.python,
@@ -631,6 +800,7 @@ def run_sweep(args: argparse.Namespace) -> int:
                     closest_gain_match=closest_gain_match,
                     tx_notify_endpoint=notify_endpoint,
                 )
+                tx_output_thread = stream_process_output(process, prefix="[tx_waveform] ")
 
                 started_at = utc_now_iso()
                 sweep_started = time.monotonic()
@@ -666,14 +836,16 @@ def run_sweep(args: argparse.Namespace) -> int:
                             f"gain={gain:g} dB."
                         )
                     exit_code = wait_for_process(process)
+                    join_process_output_thread(tx_output_thread)
                 except Exception:
-                    if process.poll() is None:
+                    if process is not None and process.poll() is None:
                         process.terminate()
                         try:
                             process.wait(timeout=5)
                         except subprocess.TimeoutExpired:
                             process.kill()
                             process.wait()
+                    join_process_output_thread(tx_output_thread)
                     raise
             finally:
                 notify_socket.close(0)
@@ -699,6 +871,8 @@ def run_sweep(args: argparse.Namespace) -> int:
                 "sweep_duration_s": round(sweep_duration_s, 3),
                 "reading_count": len(readings),
                 "readings": readings,
+                "target_voltage_mv": args.target_voltage,
+                "target_voltage_ack": target_voltage_ack,
             }
             append_jsonl(args.output, record)
             completed_sweeps += 1
@@ -770,6 +944,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Optional EP target voltage in mV (uint32). If set, sent once before the sweep.",
     )
     parser.add_argument(
+        "--target-voltage-ack-timeout",
+        type=float,
+        default=DEFAULT_TARGET_VOLTAGE_ACK_TIMEOUT_S,
+        help=(
+            "Seconds to wait for the EP CMD/VALUE acknowledgement after --target-voltage "
+            f"(default: {DEFAULT_TARGET_VOLTAGE_ACK_TIMEOUT_S:g})"
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -787,6 +970,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Run identifier. If omitted, a timestamp run-id is generated.",
     )
     parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Text log path. Relative paths resolve inside results/<run-id>/ (default: measure_ep_power.log).",
+    )
+    parser.add_argument(
         "--python",
         default=default_python_executable(),
         help=(
@@ -797,10 +986,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> int:
-    args = build_arg_parser().parse_args()
-    run_id = args.run_id if args.run_id else timestamp_run_id()
-    results_dir = args.results_dir.resolve()
+def run_measurement(args: argparse.Namespace, *, run_id: str, results_dir: Path) -> int:
     if args.output is None:
         args.output = resolve_output_path(
             None,
@@ -825,6 +1011,8 @@ def main() -> int:
         raise ValueError("--tx-start-timeout must be > 0")
     if args.serial_timeout <= 0:
         raise ValueError("--serial-timeout must be > 0")
+    if args.target_voltage_ack_timeout <= 0:
+        raise ValueError("--target-voltage-ack-timeout must be > 0")
     if args.target_voltage is not None and not (0 <= args.target_voltage <= 0xFFFFFFFF):
         raise ValueError("--target-voltage must be in [0, 4294967295]")
     if not Path(args.python).exists() and shutil.which(args.python) is None:
@@ -835,19 +1023,37 @@ def main() -> int:
         run_id=run_id,
         script_name=Path(__file__).name,
         argv=sys.argv[1:],
-        extra={"output": str(args.output)},
+        extra={"output": str(args.output), "log_file": str(args.log_file)},
     )
     print(f"Updated run manifest: {manifest_path}")
 
     return run_sweep(args)
 
 
+def main() -> int:
+    args = build_arg_parser().parse_args()
+    run_id = args.run_id if args.run_id else timestamp_run_id()
+    results_dir = args.results_dir.resolve()
+    args.log_file = resolve_run_log_path(
+        args.log_file,
+        results_dir=results_dir,
+        run_id=run_id,
+    )
+
+    with args.log_file.open("a", encoding="utf-8", buffering=1) as log_handle:
+        stdout = TeeTextIO(sys.stdout, log_handle)
+        stderr = TeeTextIO(sys.stderr, log_handle)
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            print(f"Logging to {args.log_file}")
+            try:
+                return run_measurement(args, run_id=run_id, results_dir=results_dir)
+            except KeyboardInterrupt:
+                print("Interrupted by user.", file=sys.stderr)
+                return 130
+            except Exception as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 1
+
+
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except KeyboardInterrupt:
-        print("Interrupted by user.", file=sys.stderr)
-        raise SystemExit(130)
-    except Exception as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+    raise SystemExit(main())
