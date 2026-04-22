@@ -321,14 +321,18 @@ def candidate_search_roots(search_dir: Path) -> list[Path]:
     return unique_roots
 
 
-def discover_measurement_files(search_dir: Path = Path("results")) -> list[Path]:
+def discover_measurement_files(
+    search_dir: Path = Path("results"),
+    *,
+    allow_repo_fallback: bool = True,
+) -> list[Path]:
     candidates: list[Path] = []
     for search_root in candidate_search_roots(search_dir):
         if not search_root.exists():
             continue
         candidates.extend(path.resolve() for path in search_root.rglob("*") if is_measurement_file(path))
 
-    if not candidates:
+    if not candidates and allow_repo_fallback:
         candidates.extend(path.resolve() for path in REPO_ROOT.rglob("*") if is_measurement_file(path))
 
     unique_candidates: list[Path] = []
@@ -338,9 +342,18 @@ def discover_measurement_files(search_dir: Path = Path("results")) -> list[Path]
     return unique_candidates
 
 
-def resolve_input_paths(input_path: Path | None, include_all: bool, search_dir: Path) -> list[Path]:
+def resolve_input_paths(
+    input_path: Path | None,
+    include_all: bool,
+    search_dir: Path,
+    *,
+    allow_repo_fallback: bool = True,
+) -> list[Path]:
     if include_all:
-        matches = discover_measurement_files(search_dir=search_dir)
+        matches = discover_measurement_files(
+            search_dir=search_dir,
+            allow_repo_fallback=allow_repo_fallback,
+        )
         if not matches:
             raise FileNotFoundError(
                 f"No measurement files found in {search_dir.resolve()} matching '*{MEASUREMENT_STEM_SUFFIX}*.jsonl'"
@@ -353,12 +366,21 @@ def resolve_input_paths(input_path: Path | None, include_all: bool, search_dir: 
             raise FileNotFoundError(f"Input file not found: {input_path}")
         return [resolved]
 
-    matches = discover_measurement_files(search_dir=search_dir)
+    matches = discover_measurement_files(
+        search_dir=search_dir,
+        allow_repo_fallback=allow_repo_fallback,
+    )
     if not matches:
         raise FileNotFoundError(
             f"No measurement files found in {search_dir.resolve()} matching '*{MEASUREMENT_STEM_SUFFIX}*.jsonl'"
         )
     return [matches[0]]
+
+
+def resolve_input_search_dir(results_dir: Path, run_id: str | None, input_path: Path | None) -> tuple[Path, bool]:
+    if run_id is None or input_path is not None:
+        return results_dir, True
+    return results_dir / run_id, False
 
 
 def default_output_name_for_input(input_path: Path) -> str:
@@ -1109,12 +1131,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         nargs="?",
         type=Path,
         default=None,
-        help="Measurement file (.json, .jsonl, or mapping-style JSON). If omitted, uses the newest '*meas-tones-power*' file.",
+        help=(
+            "Measurement file (.json, .jsonl, or mapping-style JSON). If omitted, uses the newest "
+            "'*meas-tones-power*' file, scoped to --run-id when provided."
+        ),
     )
     parser.add_argument(
         "--all",
         action="store_true",
-        help="Plot every '*meas-tones-power*' measurement file in the current directory, newest first",
+        help="Plot every matching '*meas-tones-power*' measurement file, scoped to --run-id when provided.",
     )
     parser.add_argument(
         "--power-key",
@@ -1142,7 +1167,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--run-id",
         default=None,
-        help="Run identifier. If omitted, inferred from input path, else manual_<timestamp>.",
+        help="Run identifier. With no input path, also searches inputs under results/<run-id>/.",
     )
     parser.add_argument(
         "--rf-calibration-csv",
@@ -1175,7 +1200,19 @@ def main() -> int:
         raise ValueError("--output cannot be used with --all because each input file gets its own output name")
 
     results_dir = resolve_results_dir(args.results_dir)
-    input_paths = resolve_input_paths(args.input, include_all=args.all, search_dir=results_dir)
+    input_search_dir, allow_repo_fallback = resolve_input_search_dir(
+        results_dir,
+        args.run_id,
+        args.input,
+    )
+    if args.input is None and args.run_id is not None:
+        print(f"Searching measurement inputs in {input_search_dir}")
+    input_paths = resolve_input_paths(
+        args.input,
+        include_all=args.all,
+        search_dir=input_search_dir,
+        allow_repo_fallback=allow_repo_fallback,
+    )
     all_figures = []
     plt_module = None
     rf_calibration = None
