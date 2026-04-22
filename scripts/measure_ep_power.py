@@ -98,6 +98,21 @@ def format_serial_bytes(data: bytes | bytearray) -> str:
     return " ".join(f"0x{byte:02X}" for byte in data)
 
 
+def format_optional_hex(value: int | None, width: int) -> str:
+    if value is None:
+        return "None"
+    return f"0x{value:0{width}X}"
+
+
+def describe_target_voltage_ack(ack: dict[str, Any]) -> str:
+    value = "None" if ack.get("value") is None else str(ack["value"])
+    return (
+        f"ACK ok={ack.get('ok')}, "
+        f"CMD={format_optional_hex(ack.get('cmd'), 2)}, "
+        f"VALUE={value} ({format_optional_hex(ack.get('value_hex'), 8)})"
+    )
+
+
 def xor_checksum(data: bytes) -> int:
     checksum = 0
     for byte in data:
@@ -778,8 +793,7 @@ def run_sweep(args: argparse.Namespace) -> int:
                 print(f"EP ACK: {ack_line}")
             print(
                 "Set EP target voltage to "
-                f"{args.target_voltage} mV; ACK CMD=0x{target_voltage_ack['cmd']:02X}, "
-                f"VALUE={target_voltage_ack['value']} (0x{target_voltage_ack['value_hex']:08X})"
+                f"{args.target_voltage} mV; {describe_target_voltage_ack(target_voltage_ack)}"
             )
 
         print(f"Using {len(gains)} gain value(s): {gains}")
