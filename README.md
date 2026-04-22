@@ -125,9 +125,10 @@ multitone `iq_N*_BW*_TXG*db.npz` files to reflect the new mapping.
 ```bash
 python3 scripts/measure_ep_power.py \
   --tones 0,1,4,8,16,32 \
+  --target-voltage 1000 \
   --bw 1000 \
   --gain-start 50 --gain-stop 80 --gain-step 0.2 \
-  --tx-duration 20 \
+  --tx-duration 10 \
   --run-id 20260304_172559
 ```
 

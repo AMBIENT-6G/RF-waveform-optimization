@@ -1,0 +1,15 @@
+{
+  "invocations": [
+    {
+      "timestamp_utc": "2026-03-26T11:08:21+00:00",
+      "script": "plot_power_stats.py",
+      "argv": [],
+      "extra": {
+        "input": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\20260326_03\\raw\\meas-tones-power.jsonl",
+        "output": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\results\\manual_20260326_120818\\plots\\meas-tones-power.png",
+        "rf_calibration_csv": "C:\\Users\\Calle\\OneDrive\\Documenten\\GitHub\\RF-waveform-optimization\\data\\gain-power-map.csv"
+      }
+    }
+  ],
+  "run_id": "manual_20260326_120818"
+}
