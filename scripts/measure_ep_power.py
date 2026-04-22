@@ -94,6 +94,10 @@ def resolve_run_log_path(
     return target
 
 
+def format_serial_bytes(data: bytes | bytearray) -> str:
+    return " ".join(f"0x{byte:02X}" for byte in data)
+
+
 def xor_checksum(data: bytes) -> int:
     checksum = 0
     for byte in data:
@@ -550,14 +554,22 @@ class EnergyProfiler:
 
         time.sleep(0.1)
         self.serial_port.reset_input_buffer()
-        self.serial_port.write(command)
+        print(
+            "EP serial write target voltage command: "
+            f"{format_serial_bytes(command)} ({len(command)} bytes)",
+            flush=True,
+        )
+        bytes_written = self.serial_port.write(command)
         self.serial_port.flush()
+        print(f"EP serial write returned {bytes_written} byte(s)", flush=True)
 
         ack = self._read_target_voltage_ack(
             expected_cmd=SET_TARGET_VOLTAGE_CMD,
             expected_value=value,
             timeout_s=ack_timeout_s,
         )
+        ack["command_hex"] = format_serial_bytes(command)
+        ack["bytes_written"] = int(bytes_written) if bytes_written is not None else None
         if not ack["ok"]:
             seen = "; ".join(ack["lines"]) if ack["lines"] else "<no text ACK>"
             raise RuntimeError(
