@@ -20,6 +20,7 @@ from run_layout import infer_run_id_from_path, manual_run_id, resolve_output_pat
 
 
 DEFAULT_PERCENTILES = (25.0, 75.0)
+BUFFER_VOLTAGE_KEY = "buffer_voltage_mv"
 MEASUREMENT_STEM_SUFFIX = "meas-tones-power"
 MEASUREMENT_TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -501,12 +502,16 @@ def build_series(
     for tone, gain_map in sorted(grouped.items()):
         gains = np.array(sorted(gain_map), dtype=float)
         mean_values = []
+        min_values = []
+        max_values = []
         percentile_a_values = []
         percentile_b_values = []
 
         for gain in gains:
             power_values = np.asarray(gain_map[float(gain)], dtype=float)
             mean_values.append(float(np.mean(power_values)))
+            min_values.append(float(np.min(power_values)))
+            max_values.append(float(np.max(power_values)))
             percentile_a_values.append(float(np.percentile(power_values, percentiles[0])))
             percentile_b_values.append(float(np.percentile(power_values, percentiles[1])))
 
@@ -518,6 +523,8 @@ def build_series(
             ),
             "gains": gains,
             "mean": np.asarray(mean_values, dtype=float),
+            "min": np.asarray(min_values, dtype=float),
+            "max": np.asarray(max_values, dtype=float),
             f"p{percentiles[0]:g}": np.asarray(percentile_a_values, dtype=float),
             f"p{percentiles[1]:g}": np.asarray(percentile_b_values, dtype=float),
         }
@@ -568,6 +575,12 @@ def input_output_mw_output_path(output: Path | None) -> Path | None:
     if output is None:
         return None
     return output.with_name(f"{output.stem}_input_output_mw_markers{output.suffix}")
+
+
+def buffer_voltage_output_path(output: Path | None) -> Path | None:
+    if output is None:
+        return None
+    return output.with_name(f"{output.stem}_buffer_voltage{output.suffix}")
 
 
 def load_reference_efficiency(path: Path) -> tuple[np.ndarray, np.ndarray] | None:
@@ -977,6 +990,7 @@ def plot_input_output_mw_markers(
 
     plt, fig, axis = make_axes()
     color_map = plt.get_cmap("tab10")
+    plotted = False
 
     for index, tone in enumerate(sorted(series)):
         tone_series = series[tone]
@@ -1013,6 +1027,76 @@ def plot_input_output_mw_markers(
     axis.set_ylabel("Output DC power Pout (mW)")
     axis.grid(True, alpha=0.3)
     axis.legend(title="Data")
+    fig.tight_layout()
+    save_figure(fig, output)
+    return plt, fig
+
+
+def plot_buffer_voltage_minmax_avg(
+    series: dict[int, dict[str, Any]],
+    output: Path | None,
+):
+    if not series:
+        print(f"Skipping buffer voltage plot: no usable {BUFFER_VOLTAGE_KEY!r} readings found.")
+        return None, None
+
+    plt, fig, axis = make_axes()
+    color_map = plt.get_cmap("tab10")
+
+    for index, tone in enumerate(sorted(series)):
+        tone_series = series[tone]
+        gains = np.asarray(tone_series["gains"], dtype=float)
+        min_values = np.asarray(tone_series["min"], dtype=float)
+        mean_values = np.asarray(tone_series["mean"], dtype=float)
+        max_values = np.asarray(tone_series["max"], dtype=float)
+        valid = (
+            np.isfinite(gains)
+            & np.isfinite(min_values)
+            & np.isfinite(mean_values)
+            & np.isfinite(max_values)
+        )
+        if not np.any(valid):
+            continue
+
+        gains = gains[valid]
+        min_values = min_values[valid]
+        mean_values = mean_values[valid]
+        max_values = max_values[valid]
+        order = np.argsort(gains)
+        gains = gains[order]
+        min_values = min_values[order]
+        mean_values = mean_values[order]
+        max_values = max_values[order]
+
+        color = color_map(index % color_map.N)
+        waveform_label = str(tone_series.get("label", waveform_label_for_tone(tone)))
+        axis.fill_between(
+            gains,
+            min_values,
+            max_values,
+            color=color,
+            alpha=0.15,
+            linewidth=0,
+        )
+        axis.plot(
+            gains,
+            mean_values,
+            color=color,
+            marker="o",
+            linewidth=1.8,
+            label=waveform_label,
+        )
+        plotted = True
+
+    if not plotted:
+        print(f"Skipping buffer voltage plot: no finite {BUFFER_VOLTAGE_KEY!r} readings found.")
+        return plt, fig
+
+    fig.suptitle("Buffer voltage statistics vs configured gain")
+    axis.set_xlabel("Configured gain (dB)")
+    axis.set_ylabel("Buffer voltage (mV)")
+    axis.grid(True, alpha=0.3)
+    axis.legend(title="Line: average | Shaded: min-max")
     fig.tight_layout()
     save_figure(fig, output)
     return plt, fig
@@ -1130,6 +1214,12 @@ def main() -> int:
         bandwidth_khz_by_tone = extract_bandwidths(records)
         grouped = group_power_by_tone_gain(records, power_key=args.power_key)
         series = build_series(grouped, percentiles=args.percentiles, waveform_labels=waveform_labels)
+        voltage_grouped = group_power_by_tone_gain(records, power_key=BUFFER_VOLTAGE_KEY)
+        voltage_series = build_series(
+            voltage_grouped,
+            percentiles=args.percentiles,
+            waveform_labels=waveform_labels,
+        )
         input_power_dbm_by_tone, used_calibration = build_input_power_lookup(
             series,
             rf_calibration=rf_calibration,
@@ -1162,12 +1252,18 @@ def main() -> int:
             input_power_dbm_by_tone=input_power_dbm_by_tone,
             use_calibrated_input=used_calibration,
         )
+        _, buffer_voltage_fig = plot_buffer_voltage_minmax_avg(
+            voltage_series,
+            output=buffer_voltage_output_path(output_path),
+        )
         all_figures.append(band_fig)
         all_figures.append(marker_fig)
         if efficiency_fig is not None:
             all_figures.append(efficiency_fig)
         if input_output_fig is not None:
             all_figures.append(input_output_fig)
+        if buffer_voltage_fig is not None:
+            all_figures.append(buffer_voltage_fig)
 
         manifest_path = write_manifest(
             results_dir=results_dir,
@@ -1180,6 +1276,7 @@ def main() -> int:
                 "rf_calibration_csv": (
                     str(rf_calibration_path) if rf_calibration_path is not None else None
                 ),
+                "buffer_voltage_output": str(buffer_voltage_output_path(output_path)),
             },
         )
         print(f"Updated run manifest: {manifest_path}")

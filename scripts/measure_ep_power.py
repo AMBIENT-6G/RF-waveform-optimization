@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import shutil
 import struct
@@ -46,6 +47,7 @@ MEASURE_WINDOW_FRACTION = 0.9
 TX_NOTIFY_POLL_TIMEOUT_MS = 50
 TX_DONE_TRIM_SAMPLES = 10
 EP_SERIAL_POLL_TIMEOUT_S = 0.05
+DEFAULT_TX_START_TIMEOUT_S = 60.0
 
 
 def xor_checksum(data: bytes) -> int:
@@ -171,8 +173,11 @@ def wait_for_tx_started(
 
         remaining_s = deadline - time.monotonic()
         if remaining_s <= 0:
+            pid = getattr(process, "pid", "unknown")
             raise TimeoutError(
-                f"Timed out after {timeout_s:g}s waiting for tx_started from tx_waveform.py"
+                f"Timed out after {timeout_s:g}s waiting for tx_started from tx_waveform.py "
+                f"(pid={pid}). TX is still running but has not accepted its first payload; "
+                "UHD startup or the first send may still be blocked."
             )
 
         timeout_ms = max(1, min(int(remaining_s * 1000), TX_NOTIFY_POLL_TIMEOUT_MS))
@@ -522,8 +527,10 @@ def launch_tx_process(
         command.append("--closest-gain-match")
     if tx_notify_endpoint is not None:
         command.extend(["--tx-notify-endpoint", tx_notify_endpoint])
-    print(f"Launching TX: {' '.join(command)}")
-    return subprocess.Popen(command)
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    print(f"Launching TX: {' '.join(command)}", flush=True)
+    return subprocess.Popen(command, env=env)
 
 
 def validate_gain_args(args: argparse.Namespace) -> tuple[bool, list[float] | None]:
@@ -738,8 +745,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tx-start-timeout",
         type=float,
-        default=15.0,
-        help="How long to wait for tx_waveform.py to emit tx_started over ZMQ before failing the sweep (default: 15)",
+        default=DEFAULT_TX_START_TIMEOUT_S,
+        help=(
+            "How long to wait for tx_waveform.py to emit tx_started over ZMQ before failing the sweep "
+            f"(default: {DEFAULT_TX_START_TIMEOUT_S:g})"
+        ),
     )
     parser.add_argument(
         "--port",

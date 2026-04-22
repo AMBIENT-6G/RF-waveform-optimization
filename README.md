@@ -161,7 +161,8 @@ is derived automatically as `0.9 * --tx-duration`.
 If `tx_done` arrives while EP sampling is still active, collection stops
 immediately and the last 10 EP samples are discarded. Use `--tx-start-timeout`
 to control how long `measure_ep_power.py` waits for the `tx_started` event
-before failing the sweep.
+before failing the sweep. The default is 60 seconds to allow for slower UHD
+device initialization.
 
 ### 4) Plot Sweep Statistics
 
@@ -171,6 +172,9 @@ python3 scripts/plot_power_stats.py \
   --run-id 20260304_172559 \
   --no-show
 ```
+
+This also writes `<input-stem>_buffer_voltage.png`, showing average buffer
+voltage with a min-max band for each waveform.
 
 For scope-only sweeps:
 
@@ -189,7 +193,7 @@ python3 scripts/fit_tone_models.py \
   --run-id 20260304_172559 \
   --no-show
 ```
-
+in
 ## Model List in `fit_tone_models.py`
 
 - `linear_efficiency`
